@@ -21,4 +21,9 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['@undecaf/zbar-wasm'],
   },
+  server: {
+    // Allow Cloudflare quick-tunnel hostnames (random *.trycloudflare.com) to
+    // reach the dev server. Without this, Vite blocks the foreign Host header.
+    allowedHosts: ['.trycloudflare.com'],
+  },
 });
