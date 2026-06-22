@@ -1,0 +1,28 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* Respect the iPhone notch / home indicator. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background-color: #0f172a; /* slate-900 */
+  color: #f8fafc; /* slate-50 */
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Disable iOS text-size auto-inflation so the big readout stays put. */
+html {
+  -webkit-text-size-adjust: 100%;
+}

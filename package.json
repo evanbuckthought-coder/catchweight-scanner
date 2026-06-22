@@ -1,0 +1,33 @@
+{
+  "name": "catchweight-scanner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "PWA that scans GS1-128 barcodes on random-weight meat cartons, tallies pallet weight, and exports to Excel. Standalone proof-of-loop, all client-side.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "parser:check": "vitest run src/lib/gs1.test.ts --reporter=verbose"
+  },
+  "dependencies": {
+    "@undecaf/zbar-wasm": "^0.11.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.9"
+  }
+}

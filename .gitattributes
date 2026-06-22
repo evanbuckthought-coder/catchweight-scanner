@@ -1,0 +1,7 @@
+# Normalise line endings: store text as LF in the repo, check out natively.
+* text=auto
+
+# Treat these as binary (no eol/diff munging).
+*.png binary
+*.wasm binary
+*.ico binary
