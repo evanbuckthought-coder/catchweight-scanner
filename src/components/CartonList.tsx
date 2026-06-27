@@ -11,7 +11,7 @@ export function CartonList({ cartons, onRemove }: CartonListProps) {
   if (cartons.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
-        No cartons captured yet. Scan a label or use a simulated scan below.
+        No cartons captured yet. Scan a label, enter one manually, or use a simulated scan.
       </div>
     );
   }
@@ -25,8 +25,15 @@ export function CartonList({ cartons, onRemove }: CartonListProps) {
         >
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="truncate font-semibold text-slate-100">
-                {c.product || '(unnamed)'}
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-semibold text-slate-100">
+                  {c.product || '(unnamed)'}
+                </span>
+                {c.manual && (
+                  <span className="shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-300 ring-1 ring-amber-500/40">
+                    Manual
+                  </span>
+                )}
               </span>
               <span className="shrink-0 font-mono font-bold tabular-nums text-emerald-400">
                 {roundKg(c.weightKg).toFixed(2)} kg

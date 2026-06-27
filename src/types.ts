@@ -41,10 +41,12 @@ export interface CartonRecord {
   bestBefore?: string;
   useBy?: string;
 
-  /** Original GS1 string, kept for audit. */
+  /** Original GS1 string, kept for audit. Empty for manual entries. */
   raw: string;
   /** weightAI|traceAI|companyPrefix — format change detector. */
   fingerprint: string;
+  /** True if the weight was keyed in by hand (unreadable barcode), not scanned. */
+  manual: boolean;
 }
 
 /** Saved per-GTIN profile so later scans auto-fill product + supplier. */
@@ -57,40 +59,11 @@ export interface GtinProfile {
   updatedAt: string;
 }
 
-/** Expected receipt figures + tolerance for variance checking. */
-export interface ReceiptExpectation {
-  /** Expected total net weight in kg (optional). */
-  expectedKg?: number;
-  /** Expected carton count (optional). */
-  expectedCartons?: number;
-  /** Absolute kg tolerance band. Default 0 (exact). */
-  toleranceKg: number;
-}
-
-/** A counting session against one receipt / PO. */
+/** A capture-and-tally session against one receipt / PO. */
 export interface Session {
   id: string;
   receiptRef: string;
   startedAt: string;
   scannedBy: string;
-  expectation: ReceiptExpectation;
   cartons: CartonRecord[];
-}
-
-export type VarianceStatus = 'match' | 'short' | 'over';
-
-/** Computed variance + GR/payment hold decision for a session. */
-export interface VarianceResult {
-  receivedKg: number;
-  receivedCartons: number;
-  expectedKg?: number;
-  expectedCartons?: number;
-  varianceKg?: number;
-  varianceCartons?: number;
-  toleranceKg: number;
-  status: VarianceStatus;
-  /** True = outside tolerance => goods receipt / payment HOLD. */
-  hold: boolean;
-  /** True if the session mixed kg + lb cartons (supervisor review). */
-  mixedUnits: boolean;
 }

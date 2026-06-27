@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { GtinProfile, ReceiptExpectation, Session } from './types';
+import type { GtinProfile, Session } from './types';
 import { parseGS1 } from './lib/gs1';
 import { suggestSupplier } from './lib/suppliers';
-import { roundKg } from './lib/units';
+import { roundKg, toKg } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, upsertProfile } from './lib/profiles';
-import { computeVariance, findDuplicate } from './lib/session';
-import { toCartonRecord } from './lib/carton';
+import { totalKg, hasMixedUnits, findDuplicate } from './lib/session';
+import { toCartonRecord, toManualCartonRecord, type ManualEntryInput } from './lib/carton';
 import { exportSessionToXlsx } from './lib/export';
 import { useLocalStorage } from './hooks/useLocalStorage';
 
@@ -14,11 +14,11 @@ import { SetupScreen } from './components/SetupScreen';
 import { SessionSetup } from './components/SessionSetup';
 import { ScannerView } from './components/ScannerView';
 import { Readout } from './components/Readout';
-import { VarianceBar } from './components/VarianceBar';
 import { CartonList } from './components/CartonList';
 import { DevPanel } from './components/DevPanel';
 import { SettingsMenu } from './components/SettingsMenu';
 import { ConfirmSheet, type PendingConfirm, type ConfirmReason } from './components/ConfirmSheet';
+import { ManualEntrySheet } from './components/ManualEntrySheet';
 
 type ToastKind = 'info' | 'warn' | 'error';
 interface Toast {
@@ -35,6 +35,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<Record<string, GtinProfile>>(() => loadProfiles());
 
   const [pending, setPending] = useState<PendingConfirm | null>(null);
+  const [manualOpen, setManualOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -52,10 +53,15 @@ export default function App() {
     setToast({ text, kind });
   }, []);
 
-  const variance = useMemo(
-    () => (session ? computeVariance(session) : null),
-    [session],
-  );
+  // Running tally (pure capture-and-count — no expected/variance comparison).
+  const tally = useMemo(() => {
+    const cartons = session?.cartons ?? [];
+    return {
+      totalKg: totalKg(cartons),
+      count: cartons.length,
+      mixedUnits: hasMixedUnits(cartons),
+    };
+  }, [session]);
 
   // --- counting -----------------------------------------------------------
 
@@ -80,7 +86,7 @@ export default function App() {
   /** Single entry point for both camera decodes and simulated/manual scans. */
   const handleDecode = useCallback(
     (raw: string) => {
-      if (!session || pending) return; // not counting, or waiting on a confirm
+      if (!session || pending || manualOpen) return; // not counting, or a sheet is open
 
       // Debounce identical repeats (camera fires many frames per second).
       const now = Date.now();
@@ -129,7 +135,7 @@ export default function App() {
       // Known GTIN, not the first carton — straight to the tally.
       addCarton(parsed, profile.productName, profile.supplierName);
     },
-    [session, pending, profiles, addCarton, showToast],
+    [session, pending, manualOpen, profiles, addCarton, showToast],
   );
 
   const confirmPending = useCallback(
@@ -151,6 +157,43 @@ export default function App() {
     [pending, addCarton],
   );
 
+  /** Add a hand-keyed carton (unreadable barcode fallback). */
+  const addManualCarton = useCallback(
+    (input: ManualEntryInput) => {
+      setSession((prev) => {
+        if (!prev) return prev;
+        const record = toManualCartonRecord(input, {
+          scannedBy,
+          receiptRef: prev.receiptRef,
+        });
+        return { ...prev, cartons: [...prev.cartons, record] };
+      });
+
+      // If a legible GTIN + names were keyed in, remember the profile so future
+      // scans of that code auto-fill (same data the scan flow uses).
+      const gtin = input.gtin?.trim();
+      if (gtin && input.product.trim()) {
+        setProfiles(
+          upsertProfile({
+            gtin,
+            productName: input.product.trim(),
+            supplierName: input.supplier.trim(),
+            fingerprint: profiles[gtin]?.fingerprint ?? '',
+            updatedAt: new Date().toISOString(),
+          }),
+        );
+      }
+
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate?.(60);
+      showToast(
+        `Added ${input.product.trim() || 'carton'} · ${roundKg(toKg(input.netWeight, input.unit)).toFixed(2)} kg (manual)`,
+        'info',
+      );
+      setManualOpen(false);
+    },
+    [scannedBy, setSession, profiles, showToast],
+  );
+
   const removeCarton = useCallback(
     (id: string) => {
       setSession((prev) => (prev ? { ...prev, cartons: prev.cartons.filter((c) => c.id !== id) } : prev));
@@ -161,13 +204,12 @@ export default function App() {
   // --- session lifecycle --------------------------------------------------
 
   const startSession = useCallback(
-    (receiptRef: string, expectation: ReceiptExpectation) => {
+    (receiptRef: string) => {
       setSession({
         id: uid(),
         receiptRef,
         startedAt: new Date().toISOString(),
         scannedBy,
-        expectation,
         cartons: [],
       });
     },
@@ -236,18 +278,25 @@ export default function App() {
         </button>
       </header>
 
-      <ScannerView active paused={!!pending} onDecode={handleDecode} />
+      <ScannerView active paused={!!pending || manualOpen} onDecode={handleDecode} />
+
+      <button
+        type="button"
+        data-testid="manual-entry"
+        onClick={() => setManualOpen(true)}
+        className="rounded-xl bg-slate-800 py-2.5 text-sm font-semibold text-slate-200 ring-1 ring-slate-600 active:bg-slate-700"
+      >
+        ✎ Enter manually (barcode won’t scan)
+      </button>
 
       <Readout
-        totalKg={variance!.receivedKg}
-        cartonCount={variance!.receivedCartons}
-        mixedUnits={variance!.mixedUnits}
+        totalKg={tally.totalKg}
+        cartonCount={tally.count}
+        mixedUnits={tally.mixedUnits}
         lastWeightKg={last?.weightKg}
         lastUnit={last?.unit}
         lastNetWeight={last?.netWeight}
       />
-
-      <VarianceBar variance={variance!} />
 
       <div className="flex gap-2">
         <button
@@ -266,6 +315,14 @@ export default function App() {
 
       {pending && (
         <ConfirmSheet pending={pending} onConfirm={confirmPending} onCancel={() => setPending(null)} />
+      )}
+
+      {manualOpen && (
+        <ManualEntrySheet
+          profiles={profiles}
+          onSubmit={addManualCarton}
+          onCancel={() => setManualOpen(false)}
+        />
       )}
 
       {settingsOpen && (

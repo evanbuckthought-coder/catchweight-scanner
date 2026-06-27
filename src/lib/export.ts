@@ -2,8 +2,8 @@
  * Client-side Excel export (SheetJS / xlsx community edition).
  *
  * Two sheets:
- *   1. Cartons        - one row per scan; the traceability record.
- *   2. Receipt summary - one row for the session; drives the GR / payment hold.
+ *   1. Cartons        - one row per carton (scanned or manual); traceability record.
+ *   2. Receipt summary - one row for the session: counts + total kg.
  *
  * These columns are deliberately the same field set that will later map to an
  * SAP EWM inbound delivery (HU/item rows + GR header). xlsx is just today's
@@ -12,7 +12,7 @@
 
 import type * as XLSXType from 'xlsx';
 import type { Session } from '../types';
-import { computeVariance, statusLabel } from './session';
+import { totalKg, hasMixedUnits, manualCount } from './session';
 import { roundKg } from './units';
 import { suggestSupplier } from './suppliers';
 
@@ -43,6 +43,7 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
   const rows = session.cartons.map((c) => ({
     'Scan time': formatDateTime(c.scanTime),
     'Scanned by': c.scannedBy,
+    Entry: c.manual ? 'Manual' : 'Scanned',
     'Receipt/PO ref': c.receiptRef,
     Supplier: c.supplier,
     Product: c.product,
@@ -59,10 +60,9 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
     'Raw GS1 string': readableRaw(c.raw),
   }));
   const ws = XLSX.utils.json_to_sheet(rows);
-  // Force GTIN + raw to text so Excel doesn't mangle long numbers into floats.
-  // (json_to_sheet already writes strings as text; this is just header width.)
+  // Column widths (json_to_sheet already writes strings, incl. GTIN, as text).
   ws['!cols'] = [
-    { wch: 20 }, { wch: 14 }, { wch: 16 }, { wch: 18 }, { wch: 14 },
+    { wch: 20 }, { wch: 14 }, { wch: 9 }, { wch: 16 }, { wch: 18 }, { wch: 14 },
     { wch: 16 }, { wch: 10 }, { wch: 6 }, { wch: 11 }, { wch: 16 },
     { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 40 },
   ];
@@ -70,24 +70,21 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
 }
 
 function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkSheet {
-  const v = computeVariance(session);
+  const cartons = session.cartons;
   const row = {
     'Receipt/PO ref': session.receiptRef,
     'Date/time': formatDateTime(session.startedAt),
     'Scanned by': session.scannedBy,
     Supplier: sessionSuppliers(session),
-    'Carton count': v.receivedCartons,
-    'Total kg': roundKg(v.receivedKg),
-    'Expected kg': v.expectedKg ?? '',
-    'Variance kg': v.varianceKg ?? '',
-    'Expected ctns': v.expectedCartons ?? '',
-    'Variance ctns': v.varianceCartons ?? '',
-    Status: statusLabel(v) + (v.mixedUnits ? ' / MIXED UNITS' : ''),
+    'Carton count': cartons.length,
+    'Total kg': totalKg(cartons),
+    'Manual cartons': manualCount(cartons),
+    'Mixed units': hasMixedUnits(cartons) ? 'Yes (kg + lb)' : 'No',
   };
   const ws = XLSX.utils.json_to_sheet([row]);
   ws['!cols'] = [
     { wch: 16 }, { wch: 20 }, { wch: 14 }, { wch: 24 }, { wch: 12 },
-    { wch: 10 }, { wch: 11 }, { wch: 11 }, { wch: 13 }, { wch: 13 }, { wch: 22 },
+    { wch: 10 }, { wch: 14 }, { wch: 16 },
   ];
   return ws;
 }

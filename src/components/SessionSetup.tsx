@@ -1,26 +1,14 @@
 import { useState } from 'react';
-import type { ReceiptExpectation } from '../types';
 
 interface SessionSetupProps {
   scannedBy: string;
-  onStart: (receiptRef: string, expectation: ReceiptExpectation) => void;
+  onStart: (receiptRef: string) => void;
   onEditName: () => void;
 }
 
-/** Start a counting session: receipt ref + optional expected totals + tolerance. */
+/** Start a capture session: just a receipt / PO reference. */
 export function SessionSetup({ scannedBy, onStart, onEditName }: SessionSetupProps) {
   const [receiptRef, setReceiptRef] = useState('');
-  const [expectedKg, setExpectedKg] = useState('');
-  const [expectedCartons, setExpectedCartons] = useState('');
-  const [tolerance, setTolerance] = useState('0');
-
-  const parseNum = (s: string): number | undefined => {
-    const t = s.trim();
-    if (t === '') return undefined;
-    const n = Number(t);
-    return Number.isFinite(n) ? n : undefined;
-  };
-
   const canStart = receiptRef.trim().length > 0;
 
   return (
@@ -47,57 +35,19 @@ export function SessionSetup({ scannedBy, onStart, onEditName }: SessionSetupPro
         />
       </label>
 
-      <fieldset className="rounded-xl bg-slate-800/50 p-3 ring-1 ring-slate-700">
-        <legend className="px-1 text-xs uppercase tracking-wide text-slate-400">
-          Expected (optional — drives variance / HOLD)
-        </legend>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block text-sm text-slate-300">
-            Expected kg
-            <input
-              inputMode="decimal"
-              value={expectedKg}
-              onChange={(e) => setExpectedKg(e.target.value)}
-              placeholder="—"
-              className="mt-1 w-full rounded-lg bg-slate-900 px-3 py-2.5 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none"
-            />
-          </label>
-          <label className="block text-sm text-slate-300">
-            Expected cartons
-            <input
-              inputMode="numeric"
-              value={expectedCartons}
-              onChange={(e) => setExpectedCartons(e.target.value)}
-              placeholder="—"
-              className="mt-1 w-full rounded-lg bg-slate-900 px-3 py-2.5 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none"
-            />
-          </label>
-          <label className="col-span-2 block text-sm text-slate-300">
-            Tolerance (± kg)
-            <input
-              inputMode="decimal"
-              value={tolerance}
-              onChange={(e) => setTolerance(e.target.value)}
-              className="mt-1 w-full rounded-lg bg-slate-900 px-3 py-2.5 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none"
-            />
-          </label>
-        </div>
-      </fieldset>
+      <p className="text-sm text-slate-500">
+        Scan or manually enter cartons; the app tallies the running kg total and carton
+        count, then exports to Excel.
+      </p>
 
       <button
         type="button"
         data-testid="start-session"
         disabled={!canStart}
-        onClick={() =>
-          onStart(receiptRef.trim(), {
-            expectedKg: parseNum(expectedKg),
-            expectedCartons: parseNum(expectedCartons),
-            toleranceKg: parseNum(tolerance) ?? 0,
-          })
-        }
+        onClick={() => onStart(receiptRef.trim())}
         className="mt-auto rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
       >
-        Start scanning
+        Start session
       </button>
     </div>
   );
