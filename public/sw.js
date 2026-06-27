@@ -1,15 +1,20 @@
 /**
- * Minimal app-shell service worker for installability + offline launch.
+ * App-shell service worker for installability + offline launch.
  *
- * Strategy: cache-first for same-origin GET requests, falling back to the
- * network and caching successful responses. This is intentionally simple — the
- * app holds all state in localStorage and has no backend to be stale against.
- * Bump CACHE_VERSION to invalidate after a deploy.
+ * Strategy:
+ *   - HTML / navigation requests -> NETWORK-FIRST (fall back to cache offline).
+ *     This is the important bit: the index.html is what references the hashed
+ *     JS/CSS bundles, so always fetching it fresh means a new deploy is picked
+ *     up immediately instead of being pinned to a stale cached shell.
+ *   - Hashed static assets (/assets/*) and other GETs -> CACHE-FIRST (they are
+ *     content-hashed and immutable, so this is safe and fast/offline-friendly).
+ *
+ * Bump CACHE_VERSION on deploys that must hard-evict old caches.
  */
-const CACHE_VERSION = 'catchweight-v1';
+const CACHE_VERSION = 'catchweight-v2';
 
 self.addEventListener('install', (event) => {
-  // Activate the new SW immediately on next load.
+  // Take over as soon as possible so updates apply on the next load.
   self.skipWaiting();
   event.waitUntil(caches.open(CACHE_VERSION));
 });
@@ -17,6 +22,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
+      // Drop every cache that isn't the current version (clears stale shells).
       const keys = await caches.keys();
       await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
       await self.clients.claim();
@@ -27,23 +33,40 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) {
-    return; // don't touch cross-origin or non-GET (e.g. camera, no requests anyway)
+    return; // ignore cross-origin / non-GET
   }
+
+  const isDocument = request.mode === 'navigate' || request.destination === 'document';
+
+  if (isDocument) {
+    // Network-first: always try the network so new deploys load; cache as backup.
+    event.respondWith(
+      (async () => {
+        try {
+          const fresh = await fetch(request);
+          const cache = await caches.open(CACHE_VERSION);
+          cache.put(request, fresh.clone());
+          return fresh;
+        } catch {
+          const cached = await caches.match(request);
+          return cached ?? Response.error();
+        }
+      })(),
+    );
+    return;
+  }
+
+  // Cache-first for hashed/static assets.
   event.respondWith(
     (async () => {
       const cached = await caches.match(request);
       if (cached) return cached;
-      try {
-        const response = await fetch(request);
-        if (response.ok) {
-          const cache = await caches.open(CACHE_VERSION);
-          cache.put(request, response.clone());
-        }
-        return response;
-      } catch (err) {
-        // Offline and not cached — let the failure surface.
-        throw err;
+      const fresh = await fetch(request);
+      if (fresh.ok) {
+        const cache = await caches.open(CACHE_VERSION);
+        cache.put(request, fresh.clone());
       }
+      return fresh;
     })(),
   );
 });
