@@ -8,6 +8,7 @@ import { loadProfiles, upsertProfile } from './lib/profiles';
 import { totalKg, hasMixedUnits, findDuplicate } from './lib/session';
 import { toCartonRecord, toManualCartonRecord, type ManualEntryInput } from './lib/carton';
 import { exportSessionToXlsx } from './lib/export';
+import { signalSuccess, signalError } from './lib/feedback';
 import { useLocalStorage } from './hooks/useLocalStorage';
 
 import { SetupScreen } from './components/SetupScreen';
@@ -77,7 +78,7 @@ export default function App() {
         });
         return { ...prev, cartons: [...prev.cartons, record] };
       });
-      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate?.(60);
+      signalSuccess();
       showToast(`Counted ${product || 'carton'} · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
     },
     [scannedBy, setSession, showToast],
@@ -97,6 +98,7 @@ export default function App() {
 
       const parsed = parseGS1(raw);
       if (!parsed.valid) {
+        signalError();
         showToast(parsed.errors[0] ?? 'Could not parse label', 'error');
         return;
       }
@@ -104,6 +106,7 @@ export default function App() {
 
       // Exact re-scan dedupe (same GTIN + trace id within the session).
       if (findDuplicate(session.cartons, gtin, parsed.traceId)) {
+        signalError();
         showToast(`Already scanned · ${parsed.traceAI === '10' ? 'batch' : 'serial'} ${parsed.traceId}`, 'warn');
         return;
       }
@@ -184,7 +187,7 @@ export default function App() {
         );
       }
 
-      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) navigator.vibrate?.(60);
+      signalSuccess();
       showToast(
         `Added ${input.product.trim() || 'carton'} · ${roundKg(toKg(input.netWeight, input.unit)).toFixed(2)} kg (manual)`,
         'info',
