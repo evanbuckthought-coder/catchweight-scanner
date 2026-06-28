@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 interface SettingsMenuProps {
   scannedBy: string;
-  receiptRef: string;
+  poRef: string;
   onChangeName: (name: string) => void;
   onEndSession: () => void;
   onClose: () => void;
@@ -11,7 +11,7 @@ interface SettingsMenuProps {
 /** Small settings sheet: edit operator name, end the current session. */
 export function SettingsMenu({
   scannedBy,
-  receiptRef,
+  poRef,
   onChangeName,
   onEndSession,
   onClose,
@@ -27,7 +27,7 @@ export function SettingsMenu({
       >
         <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-slate-600" />
         <h2 className="text-lg font-bold">Settings</h2>
-        <p className="text-xs text-slate-400">Session: {receiptRef}</p>
+        <p className="text-xs text-slate-400">PO: {poRef}</p>
 
         <label className="mt-4 block text-sm font-medium text-slate-300">
           Operator name

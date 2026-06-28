@@ -1,38 +1,39 @@
 /**
  * Shared data model for the Catchweight Scanner.
  *
- * NB: the carton + session field sets below are intentionally the same shape we
- * would later map to an SAP EWM inbound delivery (handling unit / delivery item
- * + GR header). The xlsx export is just the current endpoint — when the native
- * SAP stage lands, these records feed the inbound delivery instead of a sheet.
+ * Hierarchy: one PO session -> many products -> many cartons. Supplier and brand
+ * are set once at the PO level; each product keeps its own carton list and the
+ * GTIN/fingerprint that defines it (for label-change detection).
+ *
+ * NB: the carton field set is intentionally the same shape we'd later map to an
+ * SAP EWM inbound delivery (handling unit / delivery item). The xlsx export is
+ * just the current endpoint.
  */
 
 import type { WeightUnit } from './lib/units';
 
-/** One scanned carton — one row in the Cartons sheet / one EWM HU later. */
+/** One captured carton (scanned or manually keyed). */
 export interface CartonRecord {
-  /** Local unique id (for list keys + removal). */
   id: string;
-  /** ISO timestamp of the scan. */
   scanTime: string;
-  /** Operator name (from settings; future: SSO identity). */
   scannedBy: string;
-  /** Receipt / PO reference this carton was counted against. */
-  receiptRef: string;
-
+  /** PO reference (session level). */
+  poRef: string;
+  /** Supplier (session level). */
   supplier: string;
+  /** Brand, if different from supplier (session level, optional). */
+  brand?: string;
+  /** Product name (the product group this carton belongs to). */
   product: string;
   gtin: string;
 
-  /** Net weight in its labelled unit. */
   netWeight: number;
   unit: WeightUnit;
-  /** Normalised weight in kilograms (what the pallet total sums). */
+  /** Normalised weight in kilograms (what totals sum). */
   weightKg: number;
 
   batch?: string;
   serial?: string;
-  /** batch (10) if present, else serial (21). */
   traceId?: string;
   traceAI?: string;
 
@@ -43,27 +44,47 @@ export interface CartonRecord {
 
   /** Original GS1 string, kept for audit. Empty for manual entries. */
   raw: string;
-  /** weightAI|traceAI|companyPrefix — format change detector. */
+  /** weightAI|traceAI|companyPrefix — format-change detector. */
   fingerprint: string;
-  /** True if the weight was keyed in by hand (unreadable barcode), not scanned. */
+  /** True if the weight was keyed in by hand (unreadable barcode). */
   manual: boolean;
 }
 
-/** Saved per-GTIN profile so later scans auto-fill product + supplier. */
+/** A product group within a PO session. */
+export interface SessionProduct {
+  id: string;
+  /** Confirmed product name (from the first-carton confirm). */
+  product: string;
+  /** GTIN that defines this product group (from its first carton). */
+  gtin: string;
+  /** Fingerprint that defines this product group (label-change baseline). */
+  fingerprint: string;
+  startedAt: string;
+  cartons: CartonRecord[];
+}
+
+/** Saved per-GTIN profile so later scans auto-fill the product name. */
 export interface GtinProfile {
   gtin: string;
   productName: string;
   supplierName: string;
-  /** Last confirmed format fingerprint for this GTIN. */
   fingerprint: string;
   updatedAt: string;
 }
 
-/** A capture-and-tally session against one receipt / PO. */
+/** A capture-and-tally session against one PO. */
 export interface Session {
   id: string;
-  receiptRef: string;
+  /** PO reference. */
+  poRef: string;
+  /** Supplier (compulsory). */
+  supplier: string;
+  /** Brand, if different from supplier (optional). */
+  brand?: string;
   startedAt: string;
   scannedBy: string;
-  cartons: CartonRecord[];
+  /** Products captured under this PO, in capture order. */
+  products: SessionProduct[];
+  /** The product currently being captured, or null when between products. */
+  activeProductId: string | null;
 }

@@ -1,47 +1,43 @@
 import { useState } from 'react';
-import type { GtinProfile } from '../types';
 import type { ManualEntryInput } from '../lib/carton';
-import { suggestSupplier } from '../lib/suppliers';
 import { toKg, roundKg, type WeightUnit } from '../lib/units';
 
 interface ManualEntrySheetProps {
-  profiles: Record<string, GtinProfile>;
+  /** Product being captured (for context — product/supplier/GTIN are inherited). */
+  productName: string;
+  /** Batch of the current product, pre-filled and editable. */
+  currentBatch?: string;
   onSubmit: (input: ManualEntryInput) => void;
   onCancel: () => void;
 }
 
 /**
- * Fallback entry for when a barcode is damaged/frosted/won't scan. The operator
- * keys in net weight + unit and a product. If they can read the printed GTIN
- * they can type it to pull product/supplier from a saved profile (same data the
- * scan flow uses); otherwise it's free text. Entries are flagged manual.
+ * Damaged-barcode fallback. Product, supplier and GTIN are inherited silently
+ * from the product being captured — the operator only keys weight + unit, and a
+ * batch that's pre-filled from the product but stays editable (so a genuinely
+ * different batch doesn't break the traceability link). Choosing lb prompts a
+ * confirmation, since kg is the norm.
  */
-export function ManualEntrySheet({ profiles, onSubmit, onCancel }: ManualEntrySheetProps) {
+export function ManualEntrySheet({ productName, currentBatch, onSubmit, onCancel }: ManualEntrySheetProps) {
   const [weight, setWeight] = useState('');
   const [unit, setUnit] = useState<WeightUnit>('kg');
-  const [gtin, setGtin] = useState('');
-  const [product, setProduct] = useState('');
-  const [supplier, setSupplier] = useState('');
-  const [batch, setBatch] = useState('');
+  const [batch, setBatch] = useState(currentBatch ?? '');
+  const [confirmingLb, setConfirmingLb] = useState(false);
 
   const weightNum = Number(weight);
   const weightValid = weight.trim() !== '' && Number.isFinite(weightNum) && weightNum > 0;
-  const canSubmit = weightValid && product.trim().length > 0;
 
-  const trimmedGtin = gtin.trim();
-  const knownProfile = trimmedGtin ? profiles[trimmedGtin] : undefined;
-  const suggested = trimmedGtin ? suggestSupplier(trimmedGtin) : undefined;
+  const doSubmit = () => {
+    onSubmit({ netWeight: weightNum, unit, batch: batch.trim() || undefined });
+  };
 
-  const submit = () => {
-    if (!canSubmit) return;
-    onSubmit({
-      netWeight: weightNum,
-      unit,
-      product: product.trim(),
-      supplier: supplier.trim(),
-      gtin: trimmedGtin || undefined,
-      batch: batch.trim() || undefined,
-    });
+  const handleAdd = () => {
+    if (!weightValid) return;
+    if (unit === 'lb' && !confirmingLb) {
+      setConfirmingLb(true); // require explicit confirmation for pounds
+      return;
+    }
+    doSubmit();
   };
 
   return (
@@ -50,8 +46,9 @@ export function ManualEntrySheet({ profiles, onSubmit, onCancel }: ManualEntrySh
         <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-600" />
 
         <div className="mb-3 rounded-xl bg-amber-500/15 px-3 py-2 text-sm text-amber-200 ring-1 ring-amber-500/40">
-          Manual entry — for a damaged/unreadable barcode. This carton will be flagged
-          “Manual” in the list and the export.
+          Manual entry for <span className="font-semibold">{productName}</span> — for a
+          damaged/unreadable barcode. Product, supplier and GTIN are inherited; this
+          carton is flagged “Manual”.
         </div>
 
         {/* Weight + unit */}
@@ -71,7 +68,10 @@ export function ManualEntrySheet({ profiles, onSubmit, onCancel }: ManualEntrySh
                 <button
                   key={u}
                   type="button"
-                  onClick={() => setUnit(u)}
+                  onClick={() => {
+                    setUnit(u);
+                    setConfirmingLb(false);
+                  }}
                   className={`px-4 py-3 text-base font-semibold ${
                     unit === u ? 'bg-emerald-500 text-slate-900' : 'bg-slate-800 text-slate-300'
                   }`}
@@ -88,63 +88,9 @@ export function ManualEntrySheet({ profiles, onSubmit, onCancel }: ManualEntrySh
           )}
         </label>
 
-        {/* Optional GTIN */}
+        {/* Batch (pre-filled, editable) */}
         <label className="mt-4 block text-sm font-medium text-slate-300">
-          GTIN (optional — if the printed code is legible)
-          <input
-            inputMode="numeric"
-            value={gtin}
-            onChange={(e) => setGtin(e.target.value)}
-            placeholder="14-digit GTIN"
-            className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 font-mono text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
-          />
-        </label>
-        {knownProfile && (
-          <button
-            type="button"
-            onClick={() => {
-              setProduct(knownProfile.productName);
-              setSupplier(knownProfile.supplierName);
-            }}
-            className="mt-2 text-xs text-emerald-300 underline"
-          >
-            Use saved profile: {knownProfile.productName} · {knownProfile.supplierName}
-          </button>
-        )}
-
-        {/* Product + supplier */}
-        <label className="mt-4 block text-sm font-medium text-slate-300">
-          Product *
-          <input
-            value={product}
-            onChange={(e) => setProduct(e.target.value)}
-            placeholder="e.g. Beef striploin"
-            className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
-          />
-        </label>
-
-        <label className="mt-3 block text-sm font-medium text-slate-300">
-          Supplier
-          <input
-            value={supplier}
-            onChange={(e) => setSupplier(e.target.value)}
-            placeholder="Supplier name"
-            className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
-          />
-        </label>
-        {suggested && suggested !== supplier && (
-          <button
-            type="button"
-            onClick={() => setSupplier(suggested)}
-            className="mt-2 text-xs text-sky-300 underline"
-          >
-            Use suggested: {suggested}
-          </button>
-        )}
-
-        {/* Optional batch/lot */}
-        <label className="mt-3 block text-sm font-medium text-slate-300">
-          Batch / Lot (optional)
+          Batch / Lot <span className="text-slate-500">(pre-filled — change if different)</span>
           <input
             value={batch}
             onChange={(e) => setBatch(e.target.value)}
@@ -153,24 +99,50 @@ export function ManualEntrySheet({ profiles, onSubmit, onCancel }: ManualEntrySh
           />
         </label>
 
-        <div className="mt-5 flex gap-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="flex-1 rounded-xl bg-slate-700 py-3 text-base font-semibold text-slate-200 active:bg-slate-600"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            data-testid="manual-add"
-            disabled={!canSubmit}
-            onClick={submit}
-            className="flex-1 rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
-          >
-            Add carton
-          </button>
-        </div>
+        {confirmingLb ? (
+          <div className="mt-5 rounded-xl bg-rose-500/10 p-3 ring-1 ring-rose-500/40">
+            <p className="text-sm text-rose-200">
+              Are you sure you want to record this in <span className="font-bold">lb</span>? It’ll
+              be converted to {roundKg(toKg(weightNum, 'lb')).toFixed(2)} kg for the total.
+            </p>
+            <div className="mt-3 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setConfirmingLb(false)}
+                className="flex-1 rounded-xl bg-slate-700 py-3 text-base font-semibold text-slate-200"
+              >
+                No, change unit
+              </button>
+              <button
+                type="button"
+                data-testid="manual-confirm-lb"
+                onClick={doSubmit}
+                className="flex-1 rounded-xl bg-rose-500 py-3 text-base font-bold text-slate-900"
+              >
+                Yes, record in lb
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-5 flex gap-3">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="flex-1 rounded-xl bg-slate-700 py-3 text-base font-semibold text-slate-200 active:bg-slate-600"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              data-testid="manual-add"
+              disabled={!weightValid}
+              onClick={handleAdd}
+              className="flex-1 rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
+            >
+              Add carton
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

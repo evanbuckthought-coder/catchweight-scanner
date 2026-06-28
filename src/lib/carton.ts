@@ -1,7 +1,7 @@
 /**
- * Turn a parsed barcode (or a manual keyed entry) + the confirmed names +
- * session context into a stored CartonRecord (one row of the traceability log /
- * future EWM HU).
+ * Build stored CartonRecords from a scanned barcode or a manual keyed entry.
+ * Product/supplier/brand/PO come from the session + active product context;
+ * manual entries inherit them silently.
  */
 
 import type { ParsedCarton } from './gs1';
@@ -9,11 +9,14 @@ import type { CartonRecord } from '../types';
 import { toKg, type WeightUnit } from './units';
 import { uid } from './storage';
 
+/** Session + active-product context shared by every carton. */
 export interface CartonContext {
   scannedBy: string;
-  receiptRef: string;
-  product: string;
+  poRef: string;
   supplier: string;
+  brand?: string;
+  /** Product group this carton belongs to. */
+  product: string;
 }
 
 /** Build a record from a scanned/parsed barcode. */
@@ -22,8 +25,9 @@ export function toCartonRecord(parsed: ParsedCarton, ctx: CartonContext): Carton
     id: uid(),
     scanTime: new Date().toISOString(),
     scannedBy: ctx.scannedBy,
-    receiptRef: ctx.receiptRef,
+    poRef: ctx.poRef,
     supplier: ctx.supplier,
+    brand: ctx.brand,
     product: ctx.product,
     gtin: parsed.gtin ?? '',
     netWeight: parsed.netWeight ?? 0,
@@ -43,33 +47,34 @@ export function toCartonRecord(parsed: ParsedCarton, ctx: CartonContext): Carton
   };
 }
 
-/** Fields the operator keys in when a barcode can't be scanned. */
+/** Fields the operator keys in for a damaged barcode (rest inherited). */
 export interface ManualEntryInput {
   netWeight: number;
   unit: WeightUnit;
-  product: string;
-  supplier: string;
-  /** Optional GTIN if the human-readable code is legible. */
-  gtin?: string;
-  /** Optional batch/lot for traceability. */
+  /** Batch/lot — pre-filled from the current product, editable. */
   batch?: string;
+}
+
+/** Manual-entry context = scan context + the inherited GTIN of the product. */
+export interface ManualCartonContext extends CartonContext {
+  gtin: string;
 }
 
 /** Build a record from a manual keyed entry (flagged manual: true). */
 export function toManualCartonRecord(
   input: ManualEntryInput,
-  ctx: { scannedBy: string; receiptRef: string },
+  ctx: ManualCartonContext,
 ): CartonRecord {
-  const gtin = input.gtin?.trim() ?? '';
   const batch = input.batch?.trim() || undefined;
   return {
     id: uid(),
     scanTime: new Date().toISOString(),
     scannedBy: ctx.scannedBy,
-    receiptRef: ctx.receiptRef,
-    supplier: input.supplier.trim(),
-    product: input.product.trim(),
-    gtin,
+    poRef: ctx.poRef,
+    supplier: ctx.supplier,
+    brand: ctx.brand,
+    product: ctx.product,
+    gtin: ctx.gtin,
     netWeight: input.netWeight,
     unit: input.unit,
     weightKg: toKg(input.netWeight, input.unit),
@@ -82,7 +87,7 @@ export function toManualCartonRecord(
     bestBefore: undefined,
     useBy: undefined,
     raw: '',
-    fingerprint: gtin ? `manual|${batch ? '10' : '?'}|${gtin.slice(0, 7)}` : 'manual',
+    fingerprint: ctx.gtin ? `manual|${batch ? '10' : '?'}|${ctx.gtin.slice(0, 7)}` : 'manual',
     manual: true,
   };
 }

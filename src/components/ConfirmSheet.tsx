@@ -2,30 +2,22 @@ import { useState } from 'react';
 import type { ParsedCarton } from '../lib/gs1';
 import { roundKg } from '../lib/units';
 
-/** Why the confirm sheet was raised (drives the banner text). */
-export type ConfirmReason = 'first-of-session' | 'new-gtin' | 'fingerprint-changed';
-
 export interface PendingConfirm {
   parsed: ParsedCarton;
+  /** Product name pre-filled from the GTIN profile (if known). */
   product: string;
-  supplier: string;
-  suggestedSupplier?: string;
-  reason: ConfirmReason;
+  /** True if this GTIN has never been seen before (no saved profile). */
+  isNewGtin: boolean;
 }
 
 interface ConfirmSheetProps {
   pending: PendingConfirm;
-  onConfirm: (product: string, supplier: string) => void;
+  /** Supplier/brand are PO-level — shown read-only for context. */
+  supplier: string;
+  brand?: string;
+  onConfirm: (product: string) => void;
   onCancel: () => void;
 }
-
-const REASON_TEXT: Record<ConfirmReason, string> = {
-  'first-of-session':
-    'First carton of this session — eyeball the box and confirm. (Required every session, even for a known GTIN.)',
-  'new-gtin': 'New GTIN — not seen before. Enter the product and supplier to save a profile.',
-  'fingerprint-changed':
-    'Label format changed for this GTIN. Re-confirm the product/supplier before counting.',
-};
 
 function Field({ label, value }: { label: string; value?: string }) {
   if (!value) return null;
@@ -37,13 +29,16 @@ function Field({ label, value }: { label: string; value?: string }) {
   );
 }
 
-/** Bottom-sheet that the operator must Confirm before the carton is counted. */
-export function ConfirmSheet({ pending, onConfirm, onCancel }: ConfirmSheetProps) {
+/**
+ * First carton of a new product. The operator eyeballs the box and confirms the
+ * product name (pre-filled from the GTIN profile when known) before counting —
+ * a deliberate fail-safe applied to every new product, since the same GTIN can
+ * hold a different product if packaging changes.
+ */
+export function ConfirmSheet({ pending, supplier, brand, onConfirm, onCancel }: ConfirmSheetProps) {
   const { parsed } = pending;
   const [product, setProduct] = useState(pending.product);
-  const [supplier, setSupplier] = useState(pending.supplier);
-
-  const canConfirm = product.trim().length > 0 && supplier.trim().length > 0;
+  const canConfirm = product.trim().length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60">
@@ -51,7 +46,8 @@ export function ConfirmSheet({ pending, onConfirm, onCancel }: ConfirmSheetProps
         <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-600" />
 
         <div className="mb-3 rounded-xl bg-sky-500/15 px-3 py-2 text-sm text-sky-200 ring-1 ring-sky-500/40">
-          {REASON_TEXT[pending.reason]}
+          First carton of a new product — eyeball the box and confirm the product.
+          {pending.isNewGtin ? ' (New GTIN — not seen before.)' : ''}
         </div>
 
         <div className="rounded-xl bg-slate-800/70 px-3 py-2">
@@ -61,6 +57,7 @@ export function ConfirmSheet({ pending, onConfirm, onCancel }: ConfirmSheetProps
               {roundKg(parsed.weightKg ?? 0).toFixed(2)} kg
             </span>
           </div>
+          <Field label="Supplier (PO)" value={brand ? `${supplier} · ${brand}` : supplier} />
           <Field label="GTIN" value={parsed.gtin} />
           <Field
             label="Net weight"
@@ -80,7 +77,6 @@ export function ConfirmSheet({ pending, onConfirm, onCancel }: ConfirmSheetProps
           <Field label="Packaging date" value={parsed.packagingDate} />
           <Field label="Best before" value={parsed.bestBefore} />
           <Field label="Use by" value={parsed.useBy} />
-          <Field label="Company prefix" value={parsed.companyPrefix} />
         </div>
 
         <label className="mt-4 block text-sm font-medium text-slate-300">
@@ -89,28 +85,10 @@ export function ConfirmSheet({ pending, onConfirm, onCancel }: ConfirmSheetProps
             value={product}
             onChange={(e) => setProduct(e.target.value)}
             placeholder="e.g. Beef striploin"
+            autoFocus
             className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:ring-2 focus:ring-sky-400 focus:outline-none"
           />
         </label>
-
-        <label className="mt-3 block text-sm font-medium text-slate-300">
-          Supplier
-          <input
-            value={supplier}
-            onChange={(e) => setSupplier(e.target.value)}
-            placeholder="Supplier name"
-            className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:ring-2 focus:ring-sky-400 focus:outline-none"
-          />
-        </label>
-        {pending.suggestedSupplier && pending.suggestedSupplier !== supplier && (
-          <button
-            type="button"
-            onClick={() => setSupplier(pending.suggestedSupplier!)}
-            className="mt-2 text-xs text-sky-300 underline"
-          >
-            Use suggested: {pending.suggestedSupplier}
-          </button>
-        )}
 
         {parsed.raw && (
           <details className="mt-3 text-xs text-slate-400">
@@ -133,7 +111,7 @@ export function ConfirmSheet({ pending, onConfirm, onCancel }: ConfirmSheetProps
             type="button"
             data-testid="confirm-count"
             disabled={!canConfirm}
-            onClick={() => onConfirm(product.trim(), supplier.trim())}
+            onClick={() => onConfirm(product.trim())}
             className="flex-1 rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
           >
             Confirm & count
