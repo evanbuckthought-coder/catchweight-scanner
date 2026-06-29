@@ -8,6 +8,8 @@ export interface PendingConfirm {
   product: string;
   /** True if this GTIN has never been seen before (no saved profile). */
   isNewGtin: boolean;
+  /** Weight sanity warnings to surface for confirmation (empty = none). */
+  weightWarnings: string[];
 }
 
 interface ConfirmSheetProps {
@@ -49,6 +51,14 @@ export function ConfirmSheet({ pending, supplier, brand, onConfirm, onCancel }: 
           First carton of a new product — eyeball the box and confirm the product.
           {pending.isNewGtin ? ' (New GTIN — not seen before.)' : ''}
         </div>
+
+        {pending.weightWarnings.length > 0 && (
+          <div className="mb-3 rounded-xl bg-amber-500/15 px-3 py-2 text-sm text-amber-200 ring-1 ring-amber-500/40">
+            {pending.weightWarnings.map((w) => (
+              <div key={w}>⚠ {w}</div>
+            ))}
+          </div>
+        )}
 
         <div className="rounded-xl bg-slate-800/70 px-3 py-2">
           <div className="mb-1 flex items-baseline justify-between">

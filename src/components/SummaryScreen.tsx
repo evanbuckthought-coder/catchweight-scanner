@@ -1,20 +1,22 @@
 import { useState } from 'react';
 import type { Session } from '../types';
-import { poTotals, productSubtotal } from '../lib/session';
+import { palletSubtotal, poTotals, productSubtotal } from '../lib/session';
 
 interface SummaryScreenProps {
   session: Session;
   onAmendProduct: (productId: string) => void;
+  onAmendPallet: (productId: string, palletId: string) => void;
   onCaptureNewProduct: () => void;
   onBackToScan: () => void;
   onExport: () => void;
   onEndSession: () => void;
 }
 
-/** End-of-session review: per-product subtotals, PO total, amend / export / end. */
+/** End-of-session review: products with their pallets, subtotals, and PO total. */
 export function SummaryScreen({
   session,
   onAmendProduct,
+  onAmendPallet,
   onCaptureNewProduct,
   onBackToScan,
   onExport,
@@ -49,30 +51,59 @@ export function SummaryScreen({
           No products captured yet.
         </div>
       ) : (
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col gap-3">
           {session.products.map((p) => {
             const sub = productSubtotal(p);
             return (
-              <li key={p.id}>
+              <li key={p.id} className="rounded-xl bg-slate-800/50 ring-1 ring-slate-700">
                 <button
                   type="button"
                   data-testid={`summary-product-${p.id}`}
                   onClick={() => onAmendProduct(p.id)}
-                  className="flex w-full items-center gap-3 rounded-xl bg-slate-800/70 px-3 py-3 text-left ring-1 ring-slate-700 active:bg-slate-700"
+                  className="flex w-full items-center gap-3 px-3 py-2.5 text-left active:bg-slate-700/40"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-semibold text-slate-100">
                       {p.product || '(unnamed)'}
                     </div>
                     <div className="truncate text-xs text-slate-400">
-                      {sub.count} carton{sub.count === 1 ? '' : 's'} · GTIN {p.gtin || '—'}
+                      {sub.count} carton{sub.count === 1 ? '' : 's'} · {p.pallets.length} pallet
+                      {p.pallets.length === 1 ? '' : 's'} · GTIN {p.gtin || '—'}
                     </div>
                   </div>
                   <span className="shrink-0 font-mono font-bold tabular-nums text-emerald-400">
                     {sub.kg.toFixed(2)} kg
                   </span>
-                  <span className="shrink-0 text-slate-500">›</span>
                 </button>
+
+                <ul className="flex flex-col gap-1 border-t border-slate-700/60 px-2 py-2">
+                  {p.pallets.map((pal, i) => {
+                    const ps = palletSubtotal(pal);
+                    return (
+                      <li key={pal.id}>
+                        <button
+                          type="button"
+                          data-testid={`summary-pallet-${pal.id}`}
+                          onClick={() => onAmendPallet(p.id, pal.id)}
+                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm active:bg-slate-700/40"
+                        >
+                          <span className="min-w-0 flex-1 truncate text-slate-300">
+                            Pallet {i + 1}
+                            {pal.palletId ? ` · ${pal.palletId}` : ''}
+                            <span className="text-slate-500">
+                              {' '}
+                              · {ps.count} carton{ps.count === 1 ? '' : 's'}
+                            </span>
+                          </span>
+                          <span className="shrink-0 font-mono tabular-nums text-slate-200">
+                            {ps.kg.toFixed(2)} kg
+                          </span>
+                          <span className="shrink-0 text-slate-500">›</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
               </li>
             );
           })}
@@ -87,7 +118,8 @@ export function SummaryScreen({
         </div>
         <div className="mt-1 text-sm text-slate-300">
           {totals.cartonCount} carton{totals.cartonCount === 1 ? '' : 's'} · {totals.productCount}{' '}
-          product{totals.productCount === 1 ? '' : 's'}
+          product{totals.productCount === 1 ? '' : 's'} · {totals.palletCount} pallet
+          {totals.palletCount === 1 ? '' : 's'}
           {totals.manual > 0 ? ` · ${totals.manual} manual` : ''}
         </div>
         {totals.mixedUnits && (

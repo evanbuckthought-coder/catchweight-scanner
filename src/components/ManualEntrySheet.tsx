@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ManualEntryInput } from '../lib/carton';
 import { toKg, roundKg, type WeightUnit } from '../lib/units';
+import { MAX_CARTON_KG, MIN_CARTON_KG } from '../lib/guardrails';
 
 interface ManualEntrySheetProps {
   /** Product being captured (for context — product/supplier/GTIN are inherited). */
@@ -18,26 +19,39 @@ interface ManualEntrySheetProps {
  * different batch doesn't break the traceability link). Choosing lb prompts a
  * confirmation, since kg is the norm.
  */
+type Step = 'form' | 'confirm-lb' | 'confirm-range';
+
 export function ManualEntrySheet({ productName, currentBatch, onSubmit, onCancel }: ManualEntrySheetProps) {
   const [weight, setWeight] = useState('');
   const [unit, setUnit] = useState<WeightUnit>('kg');
   const [batch, setBatch] = useState(currentBatch ?? '');
-  const [confirmingLb, setConfirmingLb] = useState(false);
+  const [step, setStep] = useState<Step>('form');
 
   const weightNum = Number(weight);
   const weightValid = weight.trim() !== '' && Number.isFinite(weightNum) && weightNum > 0;
+  const kg = weightValid ? toKg(weightNum, unit) : 0;
+  const outOfRange = weightValid && (kg < MIN_CARTON_KG || kg > MAX_CARTON_KG);
 
   const doSubmit = () => {
     onSubmit({ netWeight: weightNum, unit, batch: batch.trim() || undefined });
   };
 
-  const handleAdd = () => {
-    if (!weightValid) return;
-    if (unit === 'lb' && !confirmingLb) {
-      setConfirmingLb(true); // require explicit confirmation for pounds
+  // form -> (lb confirm if lb) -> (range confirm if out of 1-40 kg) -> submit.
+  const checkRangeThenSubmit = () => {
+    if (outOfRange) {
+      setStep('confirm-range');
       return;
     }
     doSubmit();
+  };
+
+  const handleAdd = () => {
+    if (!weightValid) return;
+    if (unit === 'lb') {
+      setStep('confirm-lb');
+      return;
+    }
+    checkRangeThenSubmit();
   };
 
   return (
@@ -59,7 +73,10 @@ export function ManualEntrySheet({ productName, currentBatch, onSubmit, onCancel
               inputMode="decimal"
               autoFocus
               value={weight}
-              onChange={(e) => setWeight(e.target.value)}
+              onChange={(e) => {
+                setWeight(e.target.value);
+                setStep('form');
+              }}
               placeholder="e.g. 13.62"
               className="min-w-0 flex-1 rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
             />
@@ -70,7 +87,7 @@ export function ManualEntrySheet({ productName, currentBatch, onSubmit, onCancel
                   type="button"
                   onClick={() => {
                     setUnit(u);
-                    setConfirmingLb(false);
+                    setStep('form');
                   }}
                   className={`px-4 py-3 text-base font-semibold ${
                     unit === u ? 'bg-emerald-500 text-slate-900' : 'bg-slate-800 text-slate-300'
@@ -99,16 +116,16 @@ export function ManualEntrySheet({ productName, currentBatch, onSubmit, onCancel
           />
         </label>
 
-        {confirmingLb ? (
+        {step === 'confirm-lb' ? (
           <div className="mt-5 rounded-xl bg-rose-500/10 p-3 ring-1 ring-rose-500/40">
             <p className="text-sm text-rose-200">
               Are you sure you want to record this in <span className="font-bold">lb</span>? It’ll
-              be converted to {roundKg(toKg(weightNum, 'lb')).toFixed(2)} kg for the total.
+              be converted to {roundKg(kg).toFixed(2)} kg for the total.
             </p>
             <div className="mt-3 flex gap-3">
               <button
                 type="button"
-                onClick={() => setConfirmingLb(false)}
+                onClick={() => setStep('form')}
                 className="flex-1 rounded-xl bg-slate-700 py-3 text-base font-semibold text-slate-200"
               >
                 No, change unit
@@ -116,10 +133,34 @@ export function ManualEntrySheet({ productName, currentBatch, onSubmit, onCancel
               <button
                 type="button"
                 data-testid="manual-confirm-lb"
-                onClick={doSubmit}
+                onClick={checkRangeThenSubmit}
                 className="flex-1 rounded-xl bg-rose-500 py-3 text-base font-bold text-slate-900"
               >
                 Yes, record in lb
+              </button>
+            </div>
+          </div>
+        ) : step === 'confirm-range' ? (
+          <div className="mt-5 rounded-xl bg-amber-500/10 p-3 ring-1 ring-amber-500/40">
+            <p className="text-sm text-amber-200">
+              ⚠ Weight {roundKg(kg).toFixed(2)} kg is outside the normal carton range (
+              {MIN_CARTON_KG}–{MAX_CARTON_KG} kg). Confirm against the label, or re-enter.
+            </p>
+            <div className="mt-3 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setStep('form')}
+                className="flex-1 rounded-xl bg-slate-700 py-3 text-base font-semibold text-slate-200"
+              >
+                Re-enter
+              </button>
+              <button
+                type="button"
+                data-testid="manual-confirm-range"
+                onClick={doSubmit}
+                className="flex-1 rounded-xl bg-amber-500 py-3 text-base font-bold text-slate-900"
+              >
+                Confirm weight
               </button>
             </div>
           </div>

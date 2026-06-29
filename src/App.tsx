@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { GtinProfile, Session } from './types';
+import type { CartonRecord, GtinProfile, Session } from './types';
 import { parseGS1 } from './lib/gs1';
 import { roundKg, toKg } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, upsertProfile } from './lib/profiles';
-import { allCartons, findDuplicate, poTotals, totalKg } from './lib/session';
+import {
+  allCartons,
+  findDuplicate,
+  palletSubtotal,
+  poTotals,
+  productCartons,
+  productSubtotal,
+} from './lib/session';
+import { weightWarnings } from './lib/guardrails';
 import { toCartonRecord, toManualCartonRecord, type ManualEntryInput } from './lib/carton';
 import { exportSessionToXlsx } from './lib/export';
 import { signalSuccess, signalError } from './lib/feedback';
@@ -20,6 +28,7 @@ import { SettingsMenu } from './components/SettingsMenu';
 import { SummaryScreen } from './components/SummaryScreen';
 import { ConfirmSheet, type PendingConfirm } from './components/ConfirmSheet';
 import { LabelChangeSheet } from './components/LabelChangeSheet';
+import { WeightConfirmSheet } from './components/WeightConfirmSheet';
 import { ManualEntrySheet } from './components/ManualEntrySheet';
 
 type ToastKind = 'info' | 'warn' | 'error';
@@ -28,13 +37,51 @@ interface Toast {
   kind: ToastKind;
 }
 
-/** A scanned carton that differs from the active product's label. */
 interface LabelIssue {
   parsed: ReturnType<typeof parseGS1>;
 }
+interface WeightPending {
+  parsed: ReturnType<typeof parseGS1>;
+  warnings: string[];
+  productName: string;
+}
 
-/** Ignore the identical decoded string if it repeats within this window. */
 const REPEAT_WINDOW_MS = 3000;
+
+/** Append a carton to the active product's active pallet, lazily creating a new
+ *  pallet when there isn't one (e.g. just after "New pallet"). Pure. */
+function withCartonAppended(session: Session, record: CartonRecord): Session {
+  const active = session.products.find((p) => p.id === session.activeProductId);
+  if (!active) return session;
+  const hasActivePallet = active.pallets.some((pl) => pl.id === session.activePalletId);
+  const newPalletId = hasActivePallet ? null : uid();
+
+  const products = session.products.map((p) => {
+    if (p.id !== session.activeProductId) return p;
+    if (newPalletId) {
+      return {
+        ...p,
+        pallets: [...p.pallets, { id: newPalletId, startedAt: new Date().toISOString(), cartons: [record] }],
+      };
+    }
+    return {
+      ...p,
+      pallets: p.pallets.map((pl) =>
+        pl.id === session.activePalletId ? { ...pl, cartons: [...pl.cartons, record] } : pl,
+      ),
+    };
+  });
+  return { ...session, products, activePalletId: newPalletId ?? session.activePalletId };
+}
+
+/** Weight warnings for a scanned (OCR) carton. */
+function scanWeightWarnings(parsed: ReturnType<typeof parseGS1>): string[] {
+  return weightWarnings({
+    weightKg: parsed.weightKg ?? 0,
+    netWeight: parsed.netWeight ?? 0,
+    isScan: true,
+  });
+}
 
 export default function App() {
   const [scannedBy, setScannedBy] = useLocalStorage<string>(STORAGE_KEYS.scannedBy, '');
@@ -44,6 +91,7 @@ export default function App() {
   const [view, setView] = useState<'scan' | 'summary'>('scan');
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const [labelIssue, setLabelIssue] = useState<LabelIssue | null>(null);
+  const [weightPending, setWeightPending] = useState<WeightPending | null>(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -63,35 +111,31 @@ export default function App() {
 
   // --- counting -----------------------------------------------------------
 
-  /** Append a scanned carton to a product (immutably) + success feedback. */
-  const commitCarton = useCallback(
-    (productId: string, parsed: ReturnType<typeof parseGS1>, productName: string) => {
+  /** Append a scanned carton to the active pallet (+ feedback). */
+  const commitScanned = useCallback(
+    (parsed: ReturnType<typeof parseGS1>) => {
       setSession((prev) => {
         if (!prev) return prev;
+        const active = prev.products.find((p) => p.id === prev.activeProductId);
+        if (!active) return prev;
         const record = toCartonRecord(parsed, {
           scannedBy,
           poRef: prev.poRef,
           supplier: prev.supplier,
           brand: prev.brand,
-          product: productName,
+          product: active.product,
         });
-        return {
-          ...prev,
-          products: prev.products.map((p) =>
-            p.id === productId ? { ...p, cartons: [...p.cartons, record] } : p,
-          ),
-        };
+        return withCartonAppended(prev, record);
       });
       signalSuccess();
-      showToast(`Counted ${productName} · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
+      showToast(`Counted · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
     },
     [scannedBy, setSession, showToast],
   );
 
-  /** Single entry point for camera decodes and simulated/manual scans. */
   const handleDecode = useCallback(
     (raw: string) => {
-      if (!session || pending || labelIssue || manualOpen || view === 'summary') return;
+      if (!session || pending || labelIssue || weightPending || manualOpen || view === 'summary') return;
 
       const now = Date.now();
       if (raw === lastDecodeRef.current.raw && now - lastDecodeRef.current.time < REPEAT_WINDOW_MS) {
@@ -114,33 +158,39 @@ export default function App() {
       }
 
       const active = session.products.find((p) => p.id === session.activeProductId) ?? null;
+      const warnings = scanWeightWarnings(parsed);
 
-      // No active product -> this is the first carton of a (new) product.
+      // First carton of a (new) product -> product confirm (weight warnings shown there too).
       if (!active) {
         const profile = profiles[gtin];
-        setPending({ parsed, product: profile?.productName ?? '', isNewGtin: !profile });
+        setPending({ parsed, product: profile?.productName ?? '', isNewGtin: !profile, weightWarnings: warnings });
         return;
       }
 
-      // Active product, but the label differs -> label-change warning.
+      // Label differs from the current product -> warn.
       if (parsed.gtin !== active.gtin || parsed.fingerprint !== active.fingerprint) {
         setLabelIssue({ parsed });
         return;
       }
 
-      // Same product, not the first carton -> straight to the tally.
-      commitCarton(active.id, parsed, active.product);
+      // Same product. Weight guardrail before committing.
+      if (warnings.length) {
+        setWeightPending({ parsed, warnings, productName: active.product });
+        return;
+      }
+      commitScanned(parsed);
     },
-    [session, pending, labelIssue, manualOpen, view, profiles, commitCarton, showToast],
+    [session, pending, labelIssue, weightPending, manualOpen, view, profiles, commitScanned, showToast],
   );
 
-  /** Confirm the first carton of a new product (creates the product group). */
+  /** Confirm the first carton of a new product (creates product + pallet 1). */
   const confirmPending = useCallback(
     (productName: string) => {
       if (!pending) return;
       const { parsed } = pending;
       const gtin = parsed.gtin!;
-      const newId = uid();
+      const productId = uid();
+      const palletId = uid();
       setSession((prev) => {
         if (!prev) return prev;
         const record = toCartonRecord(parsed, {
@@ -155,15 +205,16 @@ export default function App() {
           products: [
             ...prev.products,
             {
-              id: newId,
+              id: productId,
               product: productName,
               gtin,
               fingerprint: parsed.fingerprint ?? '',
               startedAt: new Date().toISOString(),
-              cartons: [record],
+              pallets: [{ id: palletId, startedAt: new Date().toISOString(), cartons: [record] }],
             },
           ],
-          activeProductId: newId,
+          activeProductId: productId,
+          activePalletId: palletId,
         };
       });
       setProfiles(
@@ -186,10 +237,17 @@ export default function App() {
 
   const labelAddAnyway = useCallback(() => {
     if (!labelIssue || !session) return;
+    const { parsed } = labelIssue;
     const active = session.products.find((p) => p.id === session.activeProductId);
-    if (active) commitCarton(active.id, labelIssue.parsed, active.product);
     setLabelIssue(null);
-  }, [labelIssue, session, commitCarton]);
+    if (!active) return;
+    const warnings = scanWeightWarnings(parsed);
+    if (warnings.length) {
+      setWeightPending({ parsed, warnings, productName: active.product });
+      return;
+    }
+    commitScanned(parsed);
+  }, [labelIssue, session, commitScanned]);
 
   const labelCancel = useCallback(() => setLabelIssue(null), []);
 
@@ -198,15 +256,29 @@ export default function App() {
     const { parsed } = labelIssue;
     const gtin = parsed.gtin!;
     const profile = profiles[gtin];
-    setSession((prev) => (prev ? { ...prev, activeProductId: null } : prev));
+    setSession((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
     setLabelIssue(null);
-    setPending({ parsed, product: profile?.productName ?? '', isNewGtin: !profile });
+    setPending({ parsed, product: profile?.productName ?? '', isNewGtin: !profile, weightWarnings: scanWeightWarnings(parsed) });
   }, [labelIssue, profiles, setSession]);
 
-  // --- product / session controls -----------------------------------------
+  // --- weight confirmation (scanned, non-first carton) --------------------
+
+  const confirmWeight = useCallback(() => {
+    if (!weightPending) return;
+    commitScanned(weightPending.parsed);
+    setWeightPending(null);
+  }, [weightPending, commitScanned]);
+
+  // --- pallet / product / session controls --------------------------------
+
+  /** New pallet, same product: drop the active pallet so the next carton starts one. */
+  const newPallet = useCallback(() => {
+    setSession((prev) => (prev ? { ...prev, activePalletId: null } : prev));
+    lastDecodeRef.current = { raw: '', time: 0 };
+  }, [setSession]);
 
   const nextProduct = useCallback(() => {
-    setSession((prev) => (prev ? { ...prev, activeProductId: null } : prev));
+    setSession((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
     lastDecodeRef.current = { raw: '', time: 0 };
   }, [setSession]);
 
@@ -224,12 +296,7 @@ export default function App() {
           product: active.product,
           gtin: active.gtin,
         });
-        return {
-          ...prev,
-          products: prev.products.map((p) =>
-            p.id === active.id ? { ...p, cartons: [...p.cartons, record] } : p,
-          ),
-        };
+        return withCartonAppended(prev, record);
       });
       signalSuccess();
       showToast(`Added ${roundKg(toKg(input.netWeight, input.unit)).toFixed(2)} kg (manual)`, 'info');
@@ -238,16 +305,27 @@ export default function App() {
     [scannedBy, setSession, showToast],
   );
 
-  /** Remove a carton from whichever product holds it; prune empty products. */
+  /** Remove a carton; prune empty pallets and products; fix active pointers. */
   const removeCarton = useCallback(
     (cartonId: string) => {
       setSession((prev) => {
         if (!prev) return prev;
         const products = prev.products
-          .map((p) => ({ ...p, cartons: p.cartons.filter((c) => c.id !== cartonId) }))
-          .filter((p) => p.cartons.length > 0);
-        const activeStillExists = products.some((p) => p.id === prev.activeProductId);
-        return { ...prev, products, activeProductId: activeStillExists ? prev.activeProductId : null };
+          .map((p) => ({
+            ...p,
+            pallets: p.pallets
+              .map((pl) => ({ ...pl, cartons: pl.cartons.filter((c) => c.id !== cartonId) }))
+              .filter((pl) => pl.cartons.length > 0),
+          }))
+          .filter((p) => p.pallets.length > 0);
+        const productOk = products.some((p) => p.id === prev.activeProductId);
+        const palletOk = products.some((p) => p.pallets.some((pl) => pl.id === prev.activePalletId));
+        return {
+          ...prev,
+          products,
+          activeProductId: productOk ? prev.activeProductId : null,
+          activePalletId: palletOk ? prev.activePalletId : null,
+        };
       });
     },
     [setSession],
@@ -264,6 +342,7 @@ export default function App() {
         scannedBy,
         products: [],
         activeProductId: null,
+        activePalletId: null,
       });
       setView('scan');
     },
@@ -292,7 +371,20 @@ export default function App() {
 
   const amendProduct = useCallback(
     (productId: string) => {
-      setSession((prev) => (prev ? { ...prev, activeProductId: productId } : prev));
+      setSession((prev) => {
+        if (!prev) return prev;
+        const product = prev.products.find((p) => p.id === productId);
+        return { ...prev, activeProductId: productId, activePalletId: product?.pallets.at(-1)?.id ?? null };
+      });
+      lastDecodeRef.current = { raw: '', time: 0 };
+      setView('scan');
+    },
+    [setSession],
+  );
+
+  const amendPallet = useCallback(
+    (productId: string, palletId: string) => {
+      setSession((prev) => (prev ? { ...prev, activeProductId: productId, activePalletId: palletId } : prev));
       lastDecodeRef.current = { raw: '', time: 0 };
       setView('scan');
     },
@@ -300,7 +392,7 @@ export default function App() {
   );
 
   const captureNewProduct = useCallback(() => {
-    setSession((prev) => (prev ? { ...prev, activeProductId: null } : prev));
+    setSession((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
     lastDecodeRef.current = { raw: '', time: 0 };
     setView('scan');
   }, [setSession]);
@@ -320,9 +412,7 @@ export default function App() {
   }
 
   if (!session) {
-    return (
-      <SessionSetup scannedBy={scannedBy} onStart={startSession} onEditName={() => setEditingName(true)} />
-    );
+    return <SessionSetup scannedBy={scannedBy} onStart={startSession} onEditName={() => setEditingName(true)} />;
   }
 
   if (view === 'summary') {
@@ -330,6 +420,7 @@ export default function App() {
       <SummaryScreen
         session={session}
         onAmendProduct={amendProduct}
+        onAmendPallet={amendPallet}
         onCaptureNewProduct={captureNewProduct}
         onBackToScan={() => setView('scan')}
         onExport={handleExport}
@@ -339,10 +430,17 @@ export default function App() {
   }
 
   const activeProduct = session.products.find((p) => p.id === session.activeProductId) ?? null;
+  const activePallet = activeProduct?.pallets.find((pl) => pl.id === session.activePalletId) ?? null;
   const totals = poTotals(session);
-  const productKg = activeProduct ? totalKg(activeProduct.cartons) : 0;
-  const productCount = activeProduct ? activeProduct.cartons.length : 0;
-  const currentBatch = activeProduct?.cartons.at(-1)?.batch;
+  const prodSub = activeProduct ? productSubtotal(activeProduct) : { count: 0, kg: 0 };
+  const palSub = activePallet ? palletSubtotal(activePallet) : { count: 0, kg: 0 };
+  const palletNumber = activeProduct
+    ? activePallet
+      ? activeProduct.pallets.findIndex((pl) => pl.id === activePallet.id) + 1
+      : activeProduct.pallets.length + 1
+    : 1;
+  const lastBatch = activeProduct ? productCartons(activeProduct).at(-1)?.batch : undefined;
+  const canNewPallet = !!activeProduct && !!activePallet && activePallet.cartons.length > 0;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-3">
@@ -364,7 +462,11 @@ export default function App() {
         </button>
       </header>
 
-      <ScannerView active paused={!!pending || !!labelIssue || manualOpen} onDecode={handleDecode} />
+      <ScannerView
+        active
+        paused={!!pending || !!labelIssue || !!weightPending || manualOpen}
+        onDecode={handleDecode}
+      />
 
       <button
         type="button"
@@ -378,13 +480,29 @@ export default function App() {
 
       <Readout
         activeProductName={activeProduct?.product}
-        productKg={productKg}
-        productCount={productCount}
+        palletNumber={palletNumber}
+        palletNew={!!activeProduct && !activePallet}
+        palletKg={palSub.kg}
+        palletCount={palSub.count}
+        productKg={prodSub.kg}
+        productCount={prodSub.count}
         poKg={totals.kg}
         poCount={totals.cartonCount}
         poProducts={totals.productCount}
+        poPallets={totals.palletCount}
         mixedUnits={totals.mixedUnits}
       />
+
+      {canNewPallet && (
+        <button
+          type="button"
+          data-testid="new-pallet"
+          onClick={newPallet}
+          className="rounded-xl bg-indigo-500/80 py-3 text-base font-semibold text-white active:bg-indigo-500"
+        >
+          + New pallet – same product
+        </button>
+      )}
 
       <div className="flex gap-2">
         {activeProduct && (
@@ -409,13 +527,15 @@ export default function App() {
 
       <DevPanel onSimulate={handleDecode} />
 
-      {activeProduct ? (
-        <CartonList cartons={activeProduct.cartons} onRemove={removeCarton} />
+      {activePallet ? (
+        <CartonList cartons={activePallet.cartons} onRemove={removeCarton} />
       ) : (
         <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
-          {session.products.length === 0
-            ? 'Scan the first carton to start the first product.'
-            : 'Scan the first carton of the next product, or tap Review to finish.'}
+          {!activeProduct
+            ? session.products.length === 0
+              ? 'Scan the first carton to start the first product.'
+              : 'Scan the first carton of the next product, or tap Review to finish.'
+            : `Scan the first carton of Pallet ${palletNumber}.`}
         </div>
       )}
 
@@ -440,10 +560,20 @@ export default function App() {
         />
       )}
 
+      {weightPending && (
+        <WeightConfirmSheet
+          parsed={weightPending.parsed}
+          warnings={weightPending.warnings}
+          productName={weightPending.productName}
+          onConfirm={confirmWeight}
+          onCancel={() => setWeightPending(null)}
+        />
+      )}
+
       {manualOpen && activeProduct && (
         <ManualEntrySheet
           productName={activeProduct.product}
-          currentBatch={currentBatch}
+          currentBatch={lastBatch}
           onSubmit={addManualCarton}
           onCancel={() => setManualOpen(false)}
         />

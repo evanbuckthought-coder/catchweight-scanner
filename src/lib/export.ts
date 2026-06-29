@@ -2,24 +2,23 @@
  * Client-side Excel export (SheetJS / xlsx community edition).
  *
  * Two sheets:
- *   1. Cartons  - per-carton rows GROUPED BY PRODUCT: a merged product banner,
- *                 the cartons, a product subtotal, a gap row, then the next
- *                 product; ends with an overall PO total row.
- *   2. Summary  - PO header + a per-product table + totals.
+ *   1. Cartons  - per-carton rows GROUPED BY PRODUCT then PALLET: a merged
+ *                 product banner, then for each pallet a merged pallet banner,
+ *                 its cartons, a pallet subtotal and a gap; then a product
+ *                 subtotal and a gap; ending in an overall PO total row.
+ *   2. Summary  - PO header + a product/pallet breakdown + totals.
  *
  * Note: the community SheetJS build doesn't write cell styles (bold/fills), so
- * the visual break between products uses merged banner rows + UPPERCASE labels +
- * gap rows rather than bold text.
+ * the visual breaks use merged banner rows + UPPERCASE labels + gap rows.
  */
 
 import type * as XLSXType from 'xlsx';
-import type { Session } from '../types';
-import { poTotals, productSubtotal } from './session';
+import type { Pallet, Session, SessionProduct } from '../types';
+import { palletSubtotal, poTotals, productSubtotal } from './session';
 import { roundKg } from './units';
 
 type XLSXModule = typeof XLSXType;
 
-/** Visible token for the FNC1/GS separator so the raw audit string is readable. */
 function readableRaw(raw: string): string {
   return raw.replace(/\x1d/g, '{GS}');
 }
@@ -31,16 +30,21 @@ function formatDateTime(iso: string): string {
 }
 
 const CARTON_HEADERS = [
-  'Scan time', 'Scanned by', 'Entry', 'PO Reference', 'Supplier', 'Brand', 'Product', 'GTIN',
-  'Net weight', 'Unit', 'Weight (kg)', 'Batch/Lot', 'Serial', 'Production date',
-  'Packaging date', 'Best before', 'Use by', 'Raw GS1 string',
+  'Scan time', 'Scanned by', 'Entry', 'PO Reference', 'Supplier', 'Brand', 'Product',
+  'Pallet', 'Pallet ID', 'GTIN', 'Net weight', 'Unit', 'Weight (kg)', 'Batch/Lot', 'Serial',
+  'Production date', 'Packaging date', 'Best before', 'Use by', 'Raw GS1 string',
 ];
-const NCOLS = CARTON_HEADERS.length; // 18
-const COL = { product: 6, weightKg: 10 } as const;
+const NCOLS = CARTON_HEADERS.length; // 20
+const COL = { product: 6, weightKg: 12 } as const;
 
 type Row = (string | number)[];
 
-function cartonRow(c: Session['products'][number]['cartons'][number], session: Session): Row {
+function cartonRow(
+  c: Pallet['cartons'][number],
+  session: Session,
+  palletNumber: number,
+  palletId: string,
+): Row {
   return [
     formatDateTime(c.scanTime),
     c.scannedBy,
@@ -49,6 +53,8 @@ function cartonRow(c: Session['products'][number]['cartons'][number], session: S
     c.supplier,
     c.brand ?? session.brand ?? '',
     c.product,
+    palletNumber,
+    palletId,
     c.gtin,
     c.netWeight,
     c.unit,
@@ -63,54 +69,59 @@ function cartonRow(c: Session['products'][number]['cartons'][number], session: S
   ];
 }
 
-function emptyRow(): Row {
-  return new Array(NCOLS).fill('');
+const emptyRow = (): Row => new Array(NCOLS).fill('');
+
+function subtotalRow(label: string, count: number, kg: number): Row {
+  const row = emptyRow();
+  row[0] = label;
+  row[COL.product] = `${count} carton${count === 1 ? '' : 's'}`;
+  row[COL.weightKg] = kg;
+  return row;
 }
 
 function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkSheet {
   const aoa: Row[] = [CARTON_HEADERS];
   const merges: XLSXType.Range[] = [];
   let r = 1;
-
-  for (const product of session.products) {
-    // Merged product banner row (the visual break).
-    const banner = `PRODUCT: ${product.product}    |    Supplier: ${session.supplier}${
-      session.brand ? `    |    Brand: ${session.brand}` : ''
-    }`;
-    aoa.push([banner]);
+  const banner = (text: string) => {
+    aoa.push([text]);
     merges.push({ s: { r, c: 0 }, e: { r, c: NCOLS - 1 } });
     r++;
-
-    for (const c of product.cartons) {
-      aoa.push(cartonRow(c, session));
-      r++;
-    }
-
-    const sub = productSubtotal(product);
-    const subRow = emptyRow();
-    subRow[0] = `SUBTOTAL — ${product.product}`;
-    subRow[COL.product] = `${sub.count} carton${sub.count === 1 ? '' : 's'}`;
-    subRow[COL.weightKg] = sub.kg;
-    aoa.push(subRow);
+  };
+  const push = (row: Row) => {
+    aoa.push(row);
     r++;
+  };
 
-    aoa.push(emptyRow()); // gap before next product
-    r++;
+  for (const product of session.products) {
+    banner(
+      `PRODUCT: ${product.product}    |    Supplier: ${session.supplier}${
+        session.brand ? `    |    Brand: ${session.brand}` : ''
+      }`,
+    );
+
+    product.pallets.forEach((pallet: Pallet, i: number) => {
+      banner(`    PALLET ${i + 1}${pallet.palletId ? `    (ID: ${pallet.palletId})` : ''}`);
+      for (const c of pallet.cartons) push(cartonRow(c, session, i + 1, pallet.palletId ?? ''));
+      const ps = palletSubtotal(pallet);
+      push(subtotalRow(`    Pallet ${i + 1} subtotal`, ps.count, ps.kg));
+      push(emptyRow());
+    });
+
+    const prod = productSubtotal(product);
+    push(subtotalRow(`PRODUCT SUBTOTAL — ${product.product}`, prod.count, prod.kg));
+    push(emptyRow());
   }
 
   const totals = poTotals(session);
-  const totalRow = emptyRow();
-  totalRow[0] = 'PO TOTAL';
-  totalRow[COL.product] = `${totals.cartonCount} carton${totals.cartonCount === 1 ? '' : 's'}`;
-  totalRow[COL.weightKg] = totals.kg;
-  aoa.push(totalRow);
+  push(subtotalRow('PO TOTAL', totals.cartonCount, totals.kg));
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
   ws['!cols'] = [
     { wch: 20 }, { wch: 14 }, { wch: 9 }, { wch: 14 }, { wch: 18 }, { wch: 14 }, { wch: 18 },
-    { wch: 16 }, { wch: 10 }, { wch: 6 }, { wch: 11 }, { wch: 16 }, { wch: 16 }, { wch: 14 },
-    { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 40 },
+    { wch: 7 }, { wch: 16 }, { wch: 16 }, { wch: 10 }, { wch: 6 }, { wch: 11 }, { wch: 16 },
+    { wch: 16 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 40 },
   ];
   return ws;
 }
@@ -124,19 +135,25 @@ function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
     ['Supplier', session.supplier],
     ['Brand', session.brand ?? ''],
     [],
-    ['Product', 'Cartons', 'Weight (kg)'],
-    ...session.products.map((p) => {
-      const sub = productSubtotal(p);
-      return [p.product, sub.count, sub.kg] as Row;
-    }),
-    [],
-    ['PO TOTAL', totals.cartonCount, totals.kg],
-    ['Products', totals.productCount],
-    ['Manual cartons', totals.manual],
-    ['Mixed units', totals.mixedUnits ? 'Yes (kg + lb)' : 'No'],
+    ['Product / Pallet', 'Cartons', 'Weight (kg)', 'Pallet ID'],
   ];
+  for (const product of session.products) {
+    const prod = productSubtotal(product);
+    aoa.push([product.product, prod.count, prod.kg, '']);
+    product.pallets.forEach((pallet: SessionProduct['pallets'][number], i: number) => {
+      const ps = palletSubtotal(pallet);
+      aoa.push([`    Pallet ${i + 1}`, ps.count, ps.kg, pallet.palletId ?? '']);
+    });
+  }
+  aoa.push([]);
+  aoa.push(['PO TOTAL', totals.cartonCount, totals.kg]);
+  aoa.push(['Products', totals.productCount]);
+  aoa.push(['Pallets', totals.palletCount]);
+  aoa.push(['Manual cartons', totals.manual]);
+  aoa.push(['Mixed units', totals.mixedUnits ? 'Yes (kg + lb)' : 'No']);
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 24 }, { wch: 12 }, { wch: 12 }];
+  ws['!cols'] = [{ wch: 26 }, { wch: 12 }, { wch: 12 }, { wch: 16 }];
   return ws;
 }
 
