@@ -19,7 +19,12 @@ export function hasMixedUnits(cartons: CartonRecord[]): boolean {
 
 /** Count of cartons whose weight was keyed in manually. */
 export function manualCount(cartons: CartonRecord[]): number {
-  return cartons.filter((c) => c.manual).length;
+  return cartons.filter((c) => c.entry === 'manual').length;
+}
+
+/** Count of cartons whose weight was read by OCR. */
+export function ocrCount(cartons: CartonRecord[]): number {
+  return cartons.filter((c) => c.entry === 'ocr').length;
 }
 
 /** Cartons across all pallets of a product, in order. */
@@ -50,6 +55,7 @@ export function poTotals(session: Session): {
   cartonCount: number;
   kg: number;
   manual: number;
+  ocr: number;
   mixedUnits: boolean;
 } {
   const cartons = allCartons(session);
@@ -59,6 +65,7 @@ export function poTotals(session: Session): {
     cartonCount: cartons.length,
     kg: totalKg(cartons),
     manual: manualCount(cartons),
+    ocr: ocrCount(cartons),
     mixedUnits: hasMixedUnits(cartons),
   };
 }

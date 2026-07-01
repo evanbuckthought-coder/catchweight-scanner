@@ -121,6 +121,7 @@ export function SummaryScreen({
           product{totals.productCount === 1 ? '' : 's'} · {totals.palletCount} pallet
           {totals.palletCount === 1 ? '' : 's'}
           {totals.manual > 0 ? ` · ${totals.manual} manual` : ''}
+          {totals.ocr > 0 ? ` · ${totals.ocr} OCR` : ''}
         </div>
         {totals.mixedUnits && (
           <div className="mt-3 rounded-lg bg-amber-500/20 px-3 py-2 text-xs font-semibold text-amber-300 ring-1 ring-amber-500/40">

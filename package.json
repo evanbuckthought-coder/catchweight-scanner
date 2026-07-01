@@ -16,6 +16,7 @@
     "@undecaf/zbar-wasm": "^0.11.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "tesseract.js": "^7.0.0",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

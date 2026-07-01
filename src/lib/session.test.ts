@@ -4,6 +4,7 @@ import {
   findDuplicate,
   hasMixedUnits,
   manualCount,
+  ocrCount,
   palletSubtotal,
   poTotals,
   productCartons,
@@ -26,7 +27,7 @@ function carton(over: Partial<CartonRecord>): CartonRecord {
     weightKg: 10,
     raw: '',
     fingerprint: 'fp',
-    manual: false,
+    entry: 'scan',
     ...over,
   };
 }
@@ -59,8 +60,10 @@ describe('carton totals', () => {
   it('flags mixed kg + lb', () => {
     expect(hasMixedUnits([carton({ unit: 'kg' }), carton({ unit: 'lb' })])).toBe(true);
   });
-  it('counts manual entries', () => {
-    expect(manualCount([carton({ manual: true }), carton({}), carton({ manual: true })])).toBe(2);
+  it('counts manual and OCR entries by capture method', () => {
+    const mix = [carton({ entry: 'manual' }), carton({}), carton({ entry: 'ocr' }), carton({ entry: 'manual' })];
+    expect(manualCount(mix)).toBe(2);
+    expect(ocrCount(mix)).toBe(1);
   });
 });
 
@@ -70,7 +73,7 @@ describe('pallet + product + PO aggregation', () => {
       pallet('a1', [carton({ weightKg: 7.05 }), carton({ weightKg: 13.24 })]),
       pallet('a2', [carton({ weightKg: 10 })]),
     ]),
-    product('b', [pallet('b1', [carton({ weightKg: 21.13, unit: 'lb', manual: true })])]),
+    product('b', [pallet('b1', [carton({ weightKg: 21.13, unit: 'lb', entry: 'manual' })])]),
   ]);
 
   it('per-pallet subtotal', () => {

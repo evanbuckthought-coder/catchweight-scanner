@@ -6,31 +6,43 @@ import {
   startCamera,
   stopCamera,
 } from '../lib/scanner';
+import { preloadOcr, recognizeVideoRegion, type OcrRead } from '../lib/ocr';
+
+export type ScanMode = 'barcode' | 'ocr';
 
 interface ScannerViewProps {
   /** Whether the camera should be live. */
   active: boolean;
   /** When true the camera stays on but decoding is suspended (e.g. confirm open). */
   paused: boolean;
-  /** Fired with each decoded CODE-128 string. */
+  /** Barcode (default) or OCR weight capture. */
+  mode: ScanMode;
+  /** Fired with each decoded CODE-128 string (barcode mode). */
   onDecode: (raw: string) => void;
+  /** Fired with each OCR read of the capture region (OCR mode). */
+  onOcrRead: (read: OcrRead) => void;
+  /** Latest OCR capture feedback (e.g. "✓ 41.1 lb → 18.64 kg"). */
+  ocrFeedback?: string;
 }
 
 type Status = 'idle' | 'loading' | 'ready' | 'error';
+type OcrStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 /**
- * Live rear-camera view with the ZBar scan loop. The loop is torn down while
- * `paused` so a confirm sheet isn't bombarded with repeat decodes, but the
- * camera stream stays warm so resuming is instant.
+ * Live rear-camera view with two capture loops: the ZBar barcode loop, or the
+ * Tesseract OCR loop reading a printed weight from a focused capture region.
+ * Loops are torn down while `paused` (a confirm sheet is open) but the camera
+ * stream stays warm so resuming is instant.
  */
-export function ScannerView({ active, paused, onDecode }: ScannerViewProps) {
+export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeedback }: ScannerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string>('');
   const [retryNonce, setRetryNonce] = useState(0);
+  const [ocrStatus, setOcrStatus] = useState<OcrStatus>('idle');
 
-  // Camera + wasm lifecycle. Re-runs on `retryNonce` bump (the Retry button).
+  // Camera + zbar wasm lifecycle. Re-runs on `retryNonce` bump (Retry button).
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
@@ -63,9 +75,27 @@ export function ScannerView({ active, paused, onDecode }: ScannerViewProps) {
     };
   }, [active, retryNonce]);
 
-  // Scan loop — only while ready and not paused.
+  // Lazy-load the OCR engine the first time OCR mode is enabled.
   useEffect(() => {
-    if (status !== 'ready' || paused || !active) return;
+    if (mode !== 'ocr' || !active || ocrStatus === 'ready' || ocrStatus === 'loading') return;
+    let cancelled = false;
+    setOcrStatus('loading');
+    preloadOcr()
+      .then(() => {
+        if (!cancelled) setOcrStatus('ready');
+      })
+      .catch((err) => {
+        console.warn('OCR engine failed to load:', err);
+        if (!cancelled) setOcrStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, active, ocrStatus]);
+
+  // Barcode scan loop.
+  useEffect(() => {
+    if (mode !== 'barcode' || status !== 'ready' || paused || !active) return;
     const video = videoRef.current;
     if (!video) return;
     const stop = runScanLoop({
@@ -74,25 +104,83 @@ export function ScannerView({ active, paused, onDecode }: ScannerViewProps) {
       onError: (err) => console.warn('scan tick failed:', err),
     });
     return stop;
-  }, [status, paused, active, onDecode]);
+  }, [mode, status, paused, active, onDecode]);
+
+  // OCR capture loop: recognitions run back-to-back with a short breather
+  // (Tesseract takes a few hundred ms per frame; a busy-wait guard is implicit
+  // in the sequential await).
+  useEffect(() => {
+    if (mode !== 'ocr' || status !== 'ready' || ocrStatus !== 'ready' || paused || !active) return;
+    const video = videoRef.current;
+    if (!video) return;
+    let stopped = false;
+    const canvas = document.createElement('canvas');
+    (async () => {
+      while (!stopped) {
+        try {
+          const read = await recognizeVideoRegion(video, canvas);
+          if (stopped) break;
+          if (read && read.text) onOcrRead(read);
+        } catch (err) {
+          console.warn('OCR tick failed:', err);
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    })();
+    return () => {
+      stopped = true;
+    };
+  }, [mode, status, ocrStatus, paused, active, onOcrRead]);
 
   return (
     <div className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black ring-1 ring-slate-700">
-      <video
-        ref={videoRef}
-        playsInline
-        muted
-        className="h-full w-full object-cover"
-      />
+      <video ref={videoRef} playsInline muted className="h-full w-full object-cover" />
 
-      {/* Scan reticle */}
-      {status === 'ready' && (
+      {/* Barcode reticle */}
+      {status === 'ready' && mode === 'barcode' && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div
             className={`h-28 w-4/5 rounded-xl border-2 ${
               paused ? 'border-amber-400/70' : 'border-emerald-400/80'
             }`}
           />
+        </div>
+      )}
+
+      {/* OCR capture box (slightly smaller than the actual crop region — see OCR_REGION) */}
+      {status === 'ready' && mode === 'ocr' && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">
+          <span className="rounded-full bg-slate-900/70 px-3 py-1 text-xs font-medium text-sky-200">
+            Align the printed weight in the box
+          </span>
+          <div
+            className={`h-[15%] w-2/3 rounded-lg border-2 ${
+              paused ? 'border-amber-400/70' : 'border-sky-400/90'
+            }`}
+          />
+          {ocrFeedback && (
+            <span className="max-w-[90%] truncate rounded-full bg-slate-900/80 px-3 py-1 text-sm font-semibold text-emerald-300">
+              {ocrFeedback}
+            </span>
+          )}
+          {ocrStatus === 'loading' && (
+            <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
+              Loading OCR engine…
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* OCR engine failed (camera itself is fine) */}
+      {status === 'ready' && mode === 'ocr' && ocrStatus === 'error' && (
+        <div className="absolute inset-x-0 bottom-3 flex justify-center">
+          <button
+            type="button"
+            onClick={() => setOcrStatus('idle')}
+            className="pointer-events-auto rounded-full bg-rose-500/90 px-4 py-1.5 text-xs font-semibold text-white"
+          >
+            OCR engine failed to load — tap to retry
+          </button>
         </div>
       )}
 

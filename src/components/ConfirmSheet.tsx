@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ParsedCarton } from '../lib/gs1';
+import type { EntryMethod } from '../types';
 import { roundKg } from '../lib/units';
 
 export interface PendingConfirm {
@@ -10,6 +11,8 @@ export interface PendingConfirm {
   isNewGtin: boolean;
   /** Weight sanity warnings to surface for confirmation (empty = none). */
   weightWarnings: string[];
+  /** How the first carton's weight was captured (barcode scan or OCR read). */
+  entry: EntryMethod;
 }
 
 interface ConfirmSheetProps {
@@ -50,6 +53,7 @@ export function ConfirmSheet({ pending, supplier, brand, onConfirm, onCancel }: 
         <div className="mb-3 rounded-xl bg-sky-500/15 px-3 py-2 text-sm text-sky-200 ring-1 ring-sky-500/40">
           First carton of a new product — eyeball the box and confirm the product.
           {pending.isNewGtin ? ' (New GTIN — not seen before.)' : ''}
+          {pending.entry === 'ocr' ? ' (Weight read by OCR.)' : ''}
         </div>
 
         {pending.weightWarnings.length > 0 && (

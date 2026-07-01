@@ -39,6 +39,13 @@ const COL = { product: 6, weightKg: 12 } as const;
 
 type Row = (string | number)[];
 
+/** Export label for how a carton's weight was captured. */
+const ENTRY_LABEL: Record<Pallet['cartons'][number]['entry'], string> = {
+  scan: 'Scanned',
+  ocr: 'OCR',
+  manual: 'Manual',
+};
+
 function cartonRow(
   c: Pallet['cartons'][number],
   session: Session,
@@ -48,7 +55,7 @@ function cartonRow(
   return [
     formatDateTime(c.scanTime),
     c.scannedBy,
-    c.manual ? 'Manual' : 'Scanned',
+    ENTRY_LABEL[c.entry],
     c.poRef,
     c.supplier,
     c.brand ?? session.brand ?? '',
@@ -150,6 +157,7 @@ function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
   aoa.push(['Products', totals.productCount]);
   aoa.push(['Pallets', totals.palletCount]);
   aoa.push(['Manual cartons', totals.manual]);
+  aoa.push(['OCR cartons', totals.ocr]);
   aoa.push(['Mixed units', totals.mixedUnits ? 'Yes (kg + lb)' : 'No']);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);

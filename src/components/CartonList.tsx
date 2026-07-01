@@ -29,9 +29,14 @@ export function CartonList({ cartons, onRemove }: CartonListProps) {
                 <span className="truncate font-semibold text-slate-100">
                   {c.product || '(unnamed)'}
                 </span>
-                {c.manual && (
+                {c.entry === 'manual' && (
                   <span className="shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-300 ring-1 ring-amber-500/40">
                     Manual
+                  </span>
+                )}
+                {c.entry === 'ocr' && (
+                  <span className="shrink-0 rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-sky-300 ring-1 ring-sky-500/40">
+                    OCR
                   </span>
                 )}
               </span>

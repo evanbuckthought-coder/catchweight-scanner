@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as XLSX from 'xlsx';
 import { buildWorkbook } from './export';
 import { parseGS1 } from './gs1';
+import { ocrToParsed } from './ocr';
 import { toCartonRecord, toManualCartonRecord } from './carton';
 import type { Pallet, Session, SessionProduct } from '../types';
 
@@ -24,14 +25,23 @@ function product(id: string, name: string, pallets: Pallet[]): SessionProduct {
   return { id, product: name, gtin: pallets[0]?.cartons[0]?.gtin ?? '', fingerprint: '', startedAt: '2026-06-22T09:00:00.000Z', pallets };
 }
 
-/** 2 products; beef has 2 pallets (one with an id), pork has a scanned + manual lb. */
+/** 2 products; beef has 2 pallets (one with an id, one with an OCR carton),
+ *  pork has a scanned + manual lb. */
 function sampleSession(): Session {
+  // OCR-read carton: inherits gtin/batch from the product context.
+  const ocrCarton = toCartonRecord(
+    ocrToParsed({ value: 18.64, unit: 'kg', text: '18.64 kg' }, { gtin: '99420023200173', batch: '6034080028' }),
+    { scannedBy: 'Evan B', poRef: 'PO-2026-0042', supplier: 'Teys Australia', brand: 'Teys Beef', product: 'Beef brisket', entry: 'ocr' },
+  );
   const beef = product('a', 'Beef brisket', [
     pallet('a1', [
       scanned('(01)99332218021206(3102)002113(13)251211(21)050073950220', 'Beef brisket'),
       scanned('(01)99418220351538(3102)001362(11)251008(21)365281020745', 'Beef brisket'),
     ], 'SSCC-001'),
-    pallet('a2', [scanned('(01)99420023200173(3102)001324(11)260202(10)6034080028', 'Beef brisket')]),
+    pallet('a2', [
+      scanned('(01)99420023200173(3102)001324(11)260202(10)6034080028', 'Beef brisket'),
+      ocrCarton,
+    ]),
   ]);
   const pork = product('b', 'Pork loin', [
     pallet('b1', [
@@ -92,28 +102,37 @@ describe('Excel export — grouped by product then pallet', () => {
 
     const totalIdx = colA.indexOf('PO TOTAL');
     expect(totalIdx).toBeGreaterThan(0);
-    const expectedKg = 21.13 + 13.62 + 13.24 + (21.65 + 10) * LB_TO_KG;
+    const expectedKg = 21.13 + 13.62 + 13.24 + 18.64 + (21.65 + 10) * LB_TO_KG;
     expect(Number(rows[totalIdx][12])).toBeCloseTo(Math.round(expectedKg * 1000) / 1000, 2);
 
     // 2 product banners + 3 pallet banners merged
     expect((wb.Sheets['Cartons']['!merges'] ?? []).length).toBe(5);
   });
 
-  it('carton rows carry the pallet number and pallet id', async () => {
+  it('carton rows carry the pallet number, pallet id, and entry method', async () => {
     const wb = await buildWorkbook(sampleSession());
     const rows = rowsOf(wb.Sheets['Cartons']);
-    const cartonRows = rows.filter((r) => r[2] === 'Scanned' || r[2] === 'Manual');
+    const cartonRows = rows.filter((r) => r[2] === 'Scanned' || r[2] === 'Manual' || r[2] === 'OCR');
     // Beef pallet 1 has an id; beef pallet 2 has none. (Pallet numbers reset per product.)
     const beefP1 = cartonRows.filter((r) => r[6] === 'Beef brisket' && r[7] === 1);
     const beefP2 = cartonRows.filter((r) => r[6] === 'Beef brisket' && r[7] === 2);
     expect(beefP1).toHaveLength(2);
     expect(beefP1.every((r) => r[8] === 'SSCC-001')).toBe(true);
-    expect(beefP2).toHaveLength(1);
+    expect(beefP2).toHaveLength(2); // 1 scanned + 1 OCR
     expect(beefP2.every((r) => r[8] === '')).toBe(true);
 
     const manual = cartonRows.find((r) => r[2] === 'Manual')!;
     expect(Number(manual[12])).toBeCloseTo(10 * LB_TO_KG, 2);
     expect(manual[13]).toBe('B-123');
+
+    // The OCR carton is flagged distinctly and keeps inherited gtin/batch + raw text.
+    const ocr = cartonRows.find((r) => r[2] === 'OCR')!;
+    expect(ocr).toBeTruthy();
+    expect(ocr[6]).toBe('Beef brisket');
+    expect(Number(ocr[12])).toBeCloseTo(18.64, 2);
+    expect(ocr[9]).toBe('99420023200173'); // inherited GTIN
+    expect(ocr[13]).toBe('6034080028'); // inherited batch
+    expect(String(ocr[19])).toContain('OCR'); // raw OCR text kept for audit
   });
 
   it('contains none of the removed expected/variance/status fields', async () => {
@@ -132,6 +151,7 @@ describe('Excel export — grouped by product then pallet', () => {
     expect(flat.some((l) => l.startsWith('Beef brisket|'))).toBe(true);
     expect(flat.some((l) => l.trim().startsWith('Pallet 1|'))).toBe(true);
     expect(flat.some((l) => l.startsWith('Pallets|'))).toBe(true);
+    expect(flat.some((l) => l.startsWith('OCR cartons|1'))).toBe(true);
     expect(flat.some((l) => l.startsWith('Mixed units|Yes'))).toBe(true);
   });
 });

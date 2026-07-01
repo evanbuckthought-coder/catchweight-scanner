@@ -13,7 +13,10 @@
 
 import type { WeightUnit } from './lib/units';
 
-/** One captured carton (scanned or manually keyed). */
+/** How a carton's weight was captured. */
+export type EntryMethod = 'scan' | 'ocr' | 'manual';
+
+/** One captured carton (barcode-scanned, OCR-read, or manually keyed). */
 export interface CartonRecord {
   id: string;
   scanTime: string;
@@ -43,12 +46,12 @@ export interface CartonRecord {
   bestBefore?: string;
   useBy?: string;
 
-  /** Original GS1 string, kept for audit. Empty for manual entries. */
+  /** Original GS1 string (or raw OCR text), kept for audit. Empty for manual entries. */
   raw: string;
-  /** weightAI|traceAI|companyPrefix — format-change detector. */
+  /** weightAI|traceAI|companyPrefix — format-change detector ("ocr" for OCR reads). */
   fingerprint: string;
-  /** True if the weight was keyed in by hand (unreadable barcode). */
-  manual: boolean;
+  /** How the weight was captured: barcode scan, OCR read, or manual keying. */
+  entry: EntryMethod;
 }
 
 /**

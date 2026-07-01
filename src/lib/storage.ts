@@ -9,9 +9,9 @@
 export const STORAGE_KEYS = {
   scannedBy: 'cw.scannedBy',
   profiles: 'cw.gtinProfiles',
-  // v3: session shape is PO -> products -> pallets -> cartons. Older sessions are
+  // v4: cartons carry an entry method (scan | ocr | manual). Older sessions are
   // intentionally ignored (different key) rather than migrated.
-  session: 'cw.currentSession.v3',
+  session: 'cw.currentSession.v4',
 } as const;
 
 export function loadJSON<T>(key: string, fallback: T): T {

@@ -1,8 +1,10 @@
-import type { ParsedCarton } from '../lib/gs1';
-import { roundKg } from '../lib/units';
+import { roundKg, type WeightUnit } from '../lib/units';
 
 interface WeightConfirmSheetProps {
-  parsed: ParsedCarton;
+  weightKg: number;
+  netWeight: number;
+  unit: WeightUnit;
+  gtin?: string;
   warnings: string[];
   productName: string;
   onConfirm: () => void;
@@ -10,13 +12,16 @@ interface WeightConfirmSheetProps {
 }
 
 /**
- * Weight sanity check for a scanned carton that isn't the first of its product
- * (those go through the product confirm instead). Forces a human glance on a
- * likely misread before it enters the tally; the operator can confirm against
- * the label or cancel and re-scan / key it manually.
+ * Weight sanity interrupt for a captured carton (barcode or OCR) that isn't the
+ * first of its product (those fold the warning into the product confirm).
+ * Forces a human glance on a likely misread before it enters the tally; the
+ * operator confirms against the label or cancels and re-captures.
  */
 export function WeightConfirmSheet({
-  parsed,
+  weightKg,
+  netWeight,
+  unit,
+  gtin,
   warnings,
   productName,
   onConfirm,
@@ -38,14 +43,10 @@ export function WeightConfirmSheet({
         <div className="rounded-xl bg-slate-800/70 px-3 py-3 text-center">
           <div className="text-xs uppercase tracking-wide text-slate-400">{productName}</div>
           <div className="mt-1 font-mono text-4xl font-bold text-amber-300">
-            {roundKg(parsed.weightKg ?? 0).toFixed(2)} <span className="text-xl text-slate-400">kg</span>
+            {roundKg(weightKg).toFixed(2)} <span className="text-xl text-slate-400">kg</span>
           </div>
-          {parsed.weightUnit === 'lb' && (
-            <div className="text-xs text-slate-400">
-              from {parsed.netWeight} lb
-            </div>
-          )}
-          {parsed.gtin && <div className="mt-1 font-mono text-xs text-slate-500">GTIN {parsed.gtin}</div>}
+          {unit === 'lb' && <div className="text-xs text-slate-400">from {netWeight} lb</div>}
+          {gtin && <div className="mt-1 font-mono text-xs text-slate-500">GTIN {gtin}</div>}
         </div>
 
         <div className="mt-5 flex gap-3">

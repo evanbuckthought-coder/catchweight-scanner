@@ -5,7 +5,7 @@
  */
 
 import type { ParsedCarton } from './gs1';
-import type { CartonRecord } from '../types';
+import type { CartonRecord, EntryMethod } from '../types';
 import { toKg, type WeightUnit } from './units';
 import { uid } from './storage';
 
@@ -17,6 +17,8 @@ export interface CartonContext {
   brand?: string;
   /** Product group this carton belongs to. */
   product: string;
+  /** How the weight was captured. Defaults to a barcode scan. */
+  entry?: EntryMethod;
 }
 
 /** Build a record from a scanned/parsed barcode. */
@@ -43,7 +45,7 @@ export function toCartonRecord(parsed: ParsedCarton, ctx: CartonContext): Carton
     useBy: parsed.useBy,
     raw: parsed.raw,
     fingerprint: parsed.fingerprint ?? '',
-    manual: false,
+    entry: ctx.entry ?? 'scan',
   };
 }
 
@@ -88,6 +90,6 @@ export function toManualCartonRecord(
     useBy: undefined,
     raw: '',
     fingerprint: ctx.gtin ? `manual|${batch ? '10' : '?'}|${ctx.gtin.slice(0, 7)}` : 'manual',
-    manual: true,
+    entry: 'manual',
   };
 }
