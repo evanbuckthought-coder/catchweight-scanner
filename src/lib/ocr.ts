@@ -97,6 +97,12 @@ export interface OcrWeight {
  * otherwise the first number. Commas are treated as decimal points (EU labels).
  * Integers up to 4 digits are accepted on purpose — a missed decimal ("1864")
  * must be *captured* so the guardrails can flag it, not silently dropped.
+ *
+ * hasDecimal keys SOLELY on the presence of a "." in the read value — never on
+ * how many digits follow it. "18.00", "18.0", "18.02", "18.643" and even a
+ * trailing-dot "18." all count as having a decimal; only a bare integer ("18",
+ * "186") does not — that absence is the signature of OCR dropping the decimal.
+ * The token regex therefore accepts ANY number of decimal digits (incl. zero).
  */
 export function parseWeightText(text: string): OcrWeight | null {
   const cleaned = text.replace(/,/g, '.');
@@ -104,12 +110,12 @@ export function parseWeightText(text: string): OcrWeight | null {
   let numStr: string | undefined;
   let unit: WeightUnit;
 
-  const nearUnit = cleaned.match(/(?<!\d)(\d{1,4}(?:\.\d{1,2})?)\s*(kg|lbs?|#)/i);
+  const nearUnit = cleaned.match(/(?<!\d)(\d{1,4}(?:\.\d*)?)\s*(kg|lbs?|#)/i);
   if (nearUnit) {
     numStr = nearUnit[1];
     unit = /^k/i.test(nearUnit[2]) ? 'kg' : 'lb';
   } else {
-    const all = [...cleaned.matchAll(/(?<!\d)\d{1,4}(?:\.\d{1,2})?(?!\d)/g)].map((m) => m[0]);
+    const all = [...cleaned.matchAll(/(?<!\d)\d{1,4}(?:\.\d*)?(?!\d)/g)].map((m) => m[0]);
     if (all.length === 0) return null;
     numStr = all.find((s) => s.includes('.')) ?? all[0];
     unit = /lb/i.test(cleaned) ? 'lb' : 'kg';

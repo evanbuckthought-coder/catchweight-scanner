@@ -18,6 +18,19 @@ describe('parseWeightText', () => {
     expect(parseWeightText('186')).toEqual({ value: 186, unit: 'kg', hasDecimal: false });
   });
 
+  it('hasDecimal keys solely on the presence of ".", not the digits after it', () => {
+    // 2, 1 and 0 trailing digits all count as having a decimal.
+    expect(parseWeightText('18.02 kg')).toEqual({ value: 18.02, unit: 'kg', hasDecimal: true });
+    expect(parseWeightText('18.00 kg')).toEqual({ value: 18, unit: 'kg', hasDecimal: true });
+    expect(parseWeightText('18.0 kg')).toEqual({ value: 18, unit: 'kg', hasDecimal: true });
+    expect(parseWeightText('18. kg')).toEqual({ value: 18, unit: 'kg', hasDecimal: true });
+    // 3 dp (some scales print to the gram) must not fall back to "18"/no-decimal.
+    expect(parseWeightText('18.643 kg')).toEqual({ value: 18.643, unit: 'kg', hasDecimal: true });
+    // Only a bare integer is flagged — the signature of a dropped decimal.
+    expect(parseWeightText('18 kg')).toEqual({ value: 18, unit: 'kg', hasDecimal: false });
+    expect(parseWeightText('1864 kg')).toEqual({ value: 1864, unit: 'kg', hasDecimal: false });
+  });
+
   it('treats a comma as a decimal point (EU labels)', () => {
     expect(parseWeightText('12,5 kg')).toEqual({ value: 12.5, unit: 'kg', hasDecimal: true });
   });
