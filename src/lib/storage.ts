@@ -9,9 +9,11 @@
 export const STORAGE_KEYS = {
   scannedBy: 'cw.scannedBy',
   profiles: 'cw.gtinProfiles',
-  // v4: cartons carry an entry method (scan | ocr | manual). Older sessions are
-  // intentionally ignored (different key) rather than migrated.
-  session: 'cw.currentSession.v4',
+  /** Test tools (simulated scans) visibility — OFF by default in production. */
+  devTools: 'cw.devTools',
+  // NB: sessions now live in IndexedDB (see lib/persistence.ts). The legacy
+  // localStorage session keys (cw.currentSession.v2/.v3/.v4) are imported and
+  // migrated there on first boot.
 } as const;
 
 export function loadJSON<T>(key: string, fallback: T): T {

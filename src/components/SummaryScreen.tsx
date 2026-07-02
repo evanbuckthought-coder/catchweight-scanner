@@ -9,7 +9,10 @@ interface SummaryScreenProps {
   onCaptureNewProduct: () => void;
   onBackToScan: () => void;
   onExport: () => void;
-  onEndSession: () => void;
+  /** Finish the receival: save to on-device history, then clear the session. */
+  onFinish: () => void;
+  /** Discard the session without saving (mistake / test run). */
+  onDiscard: () => void;
 }
 
 /** End-of-session review: products with their pallets, subtotals, and PO total. */
@@ -20,10 +23,11 @@ export function SummaryScreen({
   onCaptureNewProduct,
   onBackToScan,
   onExport,
-  onEndSession,
+  onFinish,
+  onDiscard,
 }: SummaryScreenProps) {
   const totals = poTotals(session);
-  const [confirmEnd, setConfirmEnd] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-3">
@@ -77,7 +81,7 @@ export function SummaryScreen({
                 </button>
 
                 <ul className="flex flex-col gap-1 border-t border-slate-700/60 px-2 py-2">
-                  {p.pallets.map((pal, i) => {
+                  {p.pallets.map((pal) => {
                     const ps = palletSubtotal(pal);
                     return (
                       <li key={pal.id}>
@@ -88,7 +92,7 @@ export function SummaryScreen({
                           className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm active:bg-slate-700/40"
                         >
                           <span className="min-w-0 flex-1 truncate text-slate-300">
-                            Pallet {i + 1}
+                            Pallet {pal.number}
                             {pal.palletId ? ` · ${pal.palletId}` : ''}
                             <span className="text-slate-500">
                               {' '}
@@ -148,31 +152,44 @@ export function SummaryScreen({
         ⬇ Export to Excel
       </button>
 
-      {!confirmEnd ? (
+      <button
+        type="button"
+        data-testid="finish-save"
+        disabled={totals.cartonCount === 0}
+        onClick={onFinish}
+        className="rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
+      >
+        ✓ Finish &amp; save to history
+      </button>
+
+      {!confirmDiscard ? (
         <button
           type="button"
-          onClick={() => setConfirmEnd(true)}
-          className="rounded-xl bg-rose-500/20 py-3 text-base font-semibold text-rose-300 ring-1 ring-rose-500/40"
+          onClick={() => setConfirmDiscard(true)}
+          className="rounded-xl bg-rose-500/20 py-3 text-sm font-semibold text-rose-300 ring-1 ring-rose-500/40"
         >
-          End session
+          Discard session (don’t save)
         </button>
       ) : (
         <div className="rounded-xl bg-rose-500/10 p-3 ring-1 ring-rose-500/40">
-          <p className="text-sm text-rose-200">End and clear this PO? Export first if you need it.</p>
+          <p className="text-sm text-rose-200">
+            Discard this PO without saving it to history? Export first if you need it.
+          </p>
           <div className="mt-2 flex gap-2">
             <button
               type="button"
-              onClick={() => setConfirmEnd(false)}
+              onClick={() => setConfirmDiscard(false)}
               className="flex-1 rounded-lg bg-slate-700 py-2 text-sm font-medium text-slate-200"
             >
               Keep
             </button>
             <button
               type="button"
-              onClick={onEndSession}
+              data-testid="discard-confirm"
+              onClick={onDiscard}
               className="flex-1 rounded-lg bg-rose-500 py-2 text-sm font-bold text-slate-900"
             >
-              End session
+              Discard
             </button>
           </div>
         </div>

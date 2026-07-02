@@ -13,6 +13,12 @@ export interface PendingConfirm {
   weightWarnings: string[];
   /** How the first carton's weight was captured (barcode scan or OCR read). */
   entry: EntryMethod;
+  /**
+   * Set when this GTIN already exists as a product in this PO: confirming
+   * CONTINUES that product on a new pallet instead of creating a duplicate
+   * product group (e.g. after an accidental "Next product").
+   */
+  resumeProductId?: string;
 }
 
 interface ConfirmSheetProps {
@@ -51,7 +57,9 @@ export function ConfirmSheet({ pending, supplier, brand, onConfirm, onCancel }: 
         <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-600" />
 
         <div className="mb-3 rounded-xl bg-sky-500/15 px-3 py-2 text-sm text-sky-200 ring-1 ring-sky-500/40">
-          First carton of a new product — eyeball the box and confirm the product.
+          {pending.resumeProductId
+            ? 'This GTIN is already a product in this PO — confirming continues it on a new pallet.'
+            : 'First carton of a new product — eyeball the box and confirm the product.'}
           {pending.isNewGtin ? ' (New GTIN — not seen before.)' : ''}
           {pending.entry === 'ocr' ? ' (Weight read by OCR.)' : ''}
         </div>

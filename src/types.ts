@@ -61,6 +61,12 @@ export interface CartonRecord {
 export interface Pallet {
   id: string;
   /**
+   * Fixed pallet number within its product, assigned at creation (max existing
+   * + 1). NOT positional: deleting an earlier pallet must not renumber the
+   * rest — the number is part of the pallet's identity in the export.
+   */
+  number: number;
+  /**
    * Optional pallet identifier. Empty for now; future: populated by scanning the
    * pallet's SSCC barcode (GS1 AI 00) to auto-start a pallet and link its id to
    * the cartons for traceability.

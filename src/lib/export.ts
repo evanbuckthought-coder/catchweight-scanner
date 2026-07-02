@@ -13,8 +13,8 @@
  */
 
 import type * as XLSXType from 'xlsx';
-import type { Pallet, Session, SessionProduct } from '../types';
-import { palletSubtotal, poTotals, productSubtotal } from './session';
+import type { CartonRecord, Pallet, Session, SessionProduct } from '../types';
+import { allCartons, manualCount, ocrCount, hasMixedUnits, productCartons } from './session';
 import { roundKg } from './units';
 
 type XLSXModule = typeof XLSXType;
@@ -23,10 +23,21 @@ function readableRaw(raw: string): string {
   return raw.replace(/\x1d/g, '{GS}');
 }
 
+/** Sortable local timestamp (YYYY-MM-DD HH:mm:ss) — lexical sort == time sort. */
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/**
+ * Export subtotals sum the ROUNDED per-carton values (the same numbers written
+ * to the carton rows), so a spreadsheet SUM() over the kg column matches the
+ * subtotal rows exactly — no mg-level drift from rounding raw values twice.
+ */
+function sumRoundedKg(cartons: CartonRecord[]): number {
+  return roundKg(cartons.reduce((sum, c) => sum + roundKg(c.weightKg), 0));
 }
 
 const CARTON_HEADERS = [
@@ -107,21 +118,20 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
       }`,
     );
 
-    product.pallets.forEach((pallet: Pallet, i: number) => {
-      banner(`    PALLET ${i + 1}${pallet.palletId ? `    (ID: ${pallet.palletId})` : ''}`);
-      for (const c of pallet.cartons) push(cartonRow(c, session, i + 1, pallet.palletId ?? ''));
-      const ps = palletSubtotal(pallet);
-      push(subtotalRow(`    Pallet ${i + 1} subtotal`, ps.count, ps.kg));
+    for (const pallet of product.pallets) {
+      banner(`    PALLET ${pallet.number}${pallet.palletId ? `    (ID: ${pallet.palletId})` : ''}`);
+      for (const c of pallet.cartons) push(cartonRow(c, session, pallet.number, pallet.palletId ?? ''));
+      push(subtotalRow(`    Pallet ${pallet.number} subtotal`, pallet.cartons.length, sumRoundedKg(pallet.cartons)));
       push(emptyRow());
-    });
+    }
 
-    const prod = productSubtotal(product);
-    push(subtotalRow(`PRODUCT SUBTOTAL — ${product.product}`, prod.count, prod.kg));
+    const prodCartons = productCartons(product);
+    push(subtotalRow(`PRODUCT SUBTOTAL — ${product.product}`, prodCartons.length, sumRoundedKg(prodCartons)));
     push(emptyRow());
   }
 
-  const totals = poTotals(session);
-  push(subtotalRow('PO TOTAL', totals.cartonCount, totals.kg));
+  const all = allCartons(session);
+  push(subtotalRow('PO TOTAL', all.length, sumRoundedKg(all)));
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
@@ -134,7 +144,7 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
 }
 
 function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkSheet {
-  const totals = poTotals(session);
+  const all = allCartons(session);
   const aoa: Row[] = [
     ['PO Reference', session.poRef],
     ['Date/time', formatDateTime(session.startedAt)],
@@ -145,20 +155,19 @@ function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
     ['Product / Pallet', 'Cartons', 'Weight (kg)', 'Pallet ID'],
   ];
   for (const product of session.products) {
-    const prod = productSubtotal(product);
-    aoa.push([product.product, prod.count, prod.kg, '']);
-    product.pallets.forEach((pallet: SessionProduct['pallets'][number], i: number) => {
-      const ps = palletSubtotal(pallet);
-      aoa.push([`    Pallet ${i + 1}`, ps.count, ps.kg, pallet.palletId ?? '']);
-    });
+    const prodCartons = productCartons(product);
+    aoa.push([product.product, prodCartons.length, sumRoundedKg(prodCartons), '']);
+    for (const pallet of product.pallets as SessionProduct['pallets']) {
+      aoa.push([`    Pallet ${pallet.number}`, pallet.cartons.length, sumRoundedKg(pallet.cartons), pallet.palletId ?? '']);
+    }
   }
   aoa.push([]);
-  aoa.push(['PO TOTAL', totals.cartonCount, totals.kg]);
-  aoa.push(['Products', totals.productCount]);
-  aoa.push(['Pallets', totals.palletCount]);
-  aoa.push(['Manual cartons', totals.manual]);
-  aoa.push(['OCR cartons', totals.ocr]);
-  aoa.push(['Mixed units', totals.mixedUnits ? 'Yes (kg + lb)' : 'No']);
+  aoa.push(['PO TOTAL', all.length, sumRoundedKg(all)]);
+  aoa.push(['Products', session.products.length]);
+  aoa.push(['Pallets', session.products.reduce((n, p) => n + p.pallets.length, 0)]);
+  aoa.push(['Manual cartons', manualCount(all)]);
+  aoa.push(['OCR cartons', ocrCount(all)]);
+  aoa.push(['Mixed units', hasMixedUnits(all) ? 'Yes (kg + lb)' : 'No']);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!cols'] = [{ wch: 26 }, { wch: 12 }, { wch: 12 }, { wch: 16 }];

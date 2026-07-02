@@ -18,8 +18,8 @@ function scanned(code: string, product: string) {
   });
 }
 
-function pallet(id: string, cartons: Pallet['cartons'], palletId?: string): Pallet {
-  return { id, palletId, startedAt: '2026-06-22T09:00:00.000Z', cartons };
+function pallet(id: string, number: number, cartons: Pallet['cartons'], palletId?: string): Pallet {
+  return { id, number, palletId, startedAt: '2026-06-22T09:00:00.000Z', cartons };
 }
 function product(id: string, name: string, pallets: Pallet[]): SessionProduct {
   return { id, product: name, gtin: pallets[0]?.cartons[0]?.gtin ?? '', fingerprint: '', startedAt: '2026-06-22T09:00:00.000Z', pallets };
@@ -34,17 +34,17 @@ function sampleSession(): Session {
     { scannedBy: 'Evan B', poRef: 'PO-2026-0042', supplier: 'Teys Australia', brand: 'Teys Beef', product: 'Beef brisket', entry: 'ocr' },
   );
   const beef = product('a', 'Beef brisket', [
-    pallet('a1', [
+    pallet('a1', 1, [
       scanned('(01)99332218021206(3102)002113(13)251211(21)050073950220', 'Beef brisket'),
       scanned('(01)99418220351538(3102)001362(11)251008(21)365281020745', 'Beef brisket'),
     ], 'SSCC-001'),
-    pallet('a2', [
+    pallet('a2', 2, [
       scanned('(01)99420023200173(3102)001324(11)260202(10)6034080028', 'Beef brisket'),
       ocrCarton,
     ]),
   ]);
   const pork = product('b', 'Pork loin', [
-    pallet('b1', [
+    pallet('b1', 1, [
       scanned('(01)90070247165421(3202)002165(13)260310(21)116069056422', 'Pork loin'),
       toManualCartonRecord(
         { netWeight: 10, unit: 'lb', batch: 'B-123' },

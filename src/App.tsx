@@ -7,11 +7,13 @@ import { loadProfiles, upsertProfile } from './lib/profiles';
 import {
   allCartons,
   findDuplicate,
+  nextPalletNumber,
   palletSubtotal,
   poTotals,
   productCartons,
   productSubtotal,
 } from './lib/session';
+import { loadActiveSession, saveActiveSession, saveReceival } from './lib/persistence';
 import { weightWarnings } from './lib/guardrails';
 import { OCR_MIN_CONFIDENCE, ocrToParsed, parseWeightText, type OcrRead } from './lib/ocr';
 import { toCartonRecord, toManualCartonRecord, type ManualEntryInput } from './lib/carton';
@@ -27,6 +29,8 @@ import { CartonList } from './components/CartonList';
 import { DevPanel } from './components/DevPanel';
 import { SettingsMenu } from './components/SettingsMenu';
 import { SummaryScreen } from './components/SummaryScreen';
+import { HistoryScreen } from './components/HistoryScreen';
+import { ResumePrompt } from './components/ResumePrompt';
 import { ConfirmSheet, type PendingConfirm } from './components/ConfirmSheet';
 import { LabelChangeSheet } from './components/LabelChangeSheet';
 import { WeightConfirmSheet } from './components/WeightConfirmSheet';
@@ -52,7 +56,7 @@ interface WeightPending {
   ocr?: { value: number; unit: WeightUnit; kg: number; text: string };
 }
 
-/** Ignore the identical decoded string if it repeats within this window. */
+/** Ignore the identical decoded string while it stays in view (sliding window). */
 const REPEAT_WINDOW_MS = 3000;
 /** After a successful OCR capture, ignore reads while the user moves cartons. */
 const OCR_SUCCESS_COOLDOWN_MS = 2500;
@@ -60,7 +64,7 @@ const OCR_SUCCESS_COOLDOWN_MS = 2500;
 const OCR_LOW_CONF_THROTTLE_MS = 2000;
 
 /** Append a carton to the active product's active pallet, lazily creating a new
- *  pallet when there isn't one (e.g. just after "New pallet"). Pure. */
+ *  pallet (with the next fixed number) when there isn't one. Pure. */
 function withCartonAppended(session: Session, record: CartonRecord): Session {
   const active = session.products.find((p) => p.id === session.activeProductId);
   if (!active) return session;
@@ -72,7 +76,10 @@ function withCartonAppended(session: Session, record: CartonRecord): Session {
     if (newPalletId) {
       return {
         ...p,
-        pallets: [...p.pallets, { id: newPalletId, startedAt: new Date().toISOString(), cartons: [record] }],
+        pallets: [
+          ...p.pallets,
+          { id: newPalletId, number: nextPalletNumber(p), startedAt: new Date().toISOString(), cartons: [record] },
+        ],
       };
     }
     return {
@@ -87,9 +94,56 @@ function withCartonAppended(session: Session, record: CartonRecord): Session {
 
 export default function App() {
   const [scannedBy, setScannedBy] = useLocalStorage<string>(STORAGE_KEYS.scannedBy, '');
-  const [session, setSession] = useLocalStorage<Session | null>(STORAGE_KEYS.session, null);
+  // Test tools default ON in dev builds, OFF in production (toggle in Settings).
+  const [devTools, setDevTools] = useLocalStorage<boolean>(STORAGE_KEYS.devTools, import.meta.env.DEV);
   const [profiles, setProfiles] = useState<Record<string, GtinProfile>>(() => loadProfiles());
 
+  // --- session persistence (IndexedDB) -------------------------------------
+  const [session, setSessionState] = useState<Session | null>(null);
+  const [boot, setBoot] = useState<'loading' | 'resume' | 'ready'>('loading');
+  const [persistError, setPersistError] = useState(false);
+  /** Latest session for synchronous checks inside commit paths. */
+  const sessionRef = useRef<Session | null>(null);
+  sessionRef.current = session;
+
+  useEffect(() => {
+    let alive = true;
+    loadActiveSession()
+      .then((s) => {
+        if (!alive) return;
+        if (s) {
+          setSessionState(s);
+          setBoot('resume'); // never silently resume OR silently discard
+        } else {
+          setBoot('ready');
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load session from device storage:', err);
+        if (alive) {
+          setBoot('ready');
+          setPersistError(true);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Persist the in-progress session on every change; surface failures loudly —
+  // silently accumulating cartons that a refresh would lose is not acceptable.
+  useEffect(() => {
+    if (boot === 'loading') return;
+    saveActiveSession(session)
+      .then(() => setPersistError(false))
+      .catch((err) => {
+        console.warn('Failed to persist session:', err);
+        setPersistError(true);
+      });
+  }, [session, boot]);
+
+  // --- UI state -------------------------------------------------------------
+  const [screen, setScreen] = useState<'main' | 'history'>('main');
   const [view, setView] = useState<'scan' | 'summary'>('scan');
   const [mode, setMode] = useState<ScanMode>('barcode');
   const [pending, setPending] = useState<PendingConfirm | null>(null);
@@ -104,6 +158,15 @@ export default function App() {
   const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
   const ocrCooldownUntilRef = useRef(0);
   const lastLowConfToneRef = useRef(0);
+  /**
+   * True while any capture-interrupting sheet is open. Set synchronously when a
+   * sheet opens so two decodes in the SAME camera frame can't both act (React
+   * state alone is stale within a single synchronous batch).
+   */
+  const sheetGateRef = useRef(false);
+  useEffect(() => {
+    sheetGateRef.current = !!(pending || labelIssue || weightPending || manualOpen);
+  }, [pending, labelIssue, weightPending, manualOpen]);
 
   useEffect(() => {
     if (!toast) return;
@@ -121,48 +184,63 @@ export default function App() {
     setToast({ text, kind });
   }, []);
 
-  // --- counting -----------------------------------------------------------
+  // --- counting -------------------------------------------------------------
 
-  /** Append a scanned carton to the active pallet (+ feedback). */
+  /** Append a scanned carton to the active pallet. Feedback only fires when the
+   *  carton can actually be counted — never a success beep for a no-op. */
   const commitScanned = useCallback(
     (parsed: ParsedCarton) => {
-      setSession((prev) => {
+      const cur = sessionRef.current;
+      const active = cur?.products.find((p) => p.id === cur.activeProductId);
+      if (!cur || !active) {
+        signalError();
+        showToast('No active product — carton NOT counted', 'error');
+        return;
+      }
+      setSessionState((prev) => {
         if (!prev) return prev;
-        const active = prev.products.find((p) => p.id === prev.activeProductId);
-        if (!active) return prev;
+        const activeNow = prev.products.find((p) => p.id === prev.activeProductId);
+        if (!activeNow) return prev;
         const record = toCartonRecord(parsed, {
           scannedBy,
           poRef: prev.poRef,
           supplier: prev.supplier,
           brand: prev.brand,
-          product: active.product,
+          product: activeNow.product,
         });
         return withCartonAppended(prev, record);
       });
       signalSuccess();
       showToast(`Counted · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
     },
-    [scannedBy, setSession, showToast],
+    [scannedBy, showToast],
   );
 
   /** Append an OCR-read carton (inherits GTIN + batch from the product). */
   const commitOcr = useCallback(
     (ocr: { value: number; unit: WeightUnit; kg: number; text: string }) => {
-      setSession((prev) => {
+      const cur = sessionRef.current;
+      const active = cur?.products.find((p) => p.id === cur.activeProductId);
+      if (!cur || !active) {
+        signalError();
+        showToast('No active product — carton NOT counted', 'error');
+        return;
+      }
+      setSessionState((prev) => {
         if (!prev) return prev;
-        const active = prev.products.find((p) => p.id === prev.activeProductId);
-        if (!active) return prev;
-        const batch = productCartons(active).at(-1)?.batch;
+        const activeNow = prev.products.find((p) => p.id === prev.activeProductId);
+        if (!activeNow) return prev;
+        const batch = productCartons(activeNow).at(-1)?.batch;
         const parsed = ocrToParsed(
           { value: ocr.value, unit: ocr.unit, text: ocr.text },
-          { gtin: active.gtin || undefined, batch },
+          { gtin: activeNow.gtin || undefined, batch },
         );
         const record = toCartonRecord(parsed, {
           scannedBy,
           poRef: prev.poRef,
           supplier: prev.supplier,
           brand: prev.brand,
-          product: active.product,
+          product: activeNow.product,
           entry: 'ocr',
         });
         return withCartonAppended(prev, record);
@@ -176,7 +254,7 @@ export default function App() {
       showToast(`Counted (OCR) · ${msg}`, 'info');
       ocrCooldownUntilRef.current = Date.now() + OCR_SUCCESS_COOLDOWN_MS;
     },
-    [scannedBy, setSession, showToast],
+    [scannedBy, showToast],
   );
 
   /** Barcode weights get the range guardrail only (decimals are exactly encoded). */
@@ -188,10 +266,13 @@ export default function App() {
   /** Single entry point for camera decodes and simulated barcode scans. */
   const handleDecode = useCallback(
     (raw: string) => {
-      if (!session || pending || labelIssue || weightPending || manualOpen || view === 'summary') return;
+      if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
 
+      // Sliding repeat window: while the same label stays in view, keep
+      // refreshing the timestamp so it can never re-add itself every 3s.
       const now = Date.now();
       if (raw === lastDecodeRef.current.raw && now - lastDecodeRef.current.time < REPEAT_WINDOW_MS) {
+        lastDecodeRef.current.time = now;
         return;
       }
       lastDecodeRef.current = { raw, time: now };
@@ -204,54 +285,69 @@ export default function App() {
       }
       const gtin = parsed.gtin!;
 
-      if (findDuplicate(allCartons(session), gtin, parsed.traceId)) {
+      // Dedupe: hard on serials; identical-raw only for batch-only labels
+      // (batches are shared across cartons and must not block the 2nd..Nth).
+      const dup = findDuplicate(allCartons(session), { gtin, serial: parsed.serial, raw });
+      if (dup) {
         signalError();
-        showToast(`Already scanned · ${parsed.traceAI === '10' ? 'batch' : 'serial'} ${parsed.traceId}`, 'warn');
+        showToast(
+          parsed.serial
+            ? `Already scanned · serial ${parsed.serial}`
+            : 'Identical label already scanned (same batch + weight)',
+          'warn',
+        );
         return;
       }
 
       const active = session.products.find((p) => p.id === session.activeProductId) ?? null;
       const warnings = scanWeightWarnings(parsed);
 
-      // First carton of a (new) product -> product confirm (weight warnings shown there too).
+      // First carton of a product -> product confirm. If this GTIN already
+      // exists in the PO, confirming continues that product (new pallet)
+      // instead of creating a duplicate group.
       if (!active) {
+        const existing = session.products.find((p) => p.gtin === gtin);
         const profile = profiles[gtin];
+        sheetGateRef.current = true;
         setPending({
           parsed,
-          product: profile?.productName ?? '',
+          product: existing?.product ?? profile?.productName ?? '',
           isNewGtin: !profile,
           weightWarnings: warnings,
           entry: 'scan',
+          resumeProductId: existing?.id,
         });
         return;
       }
 
       // Label differs from the current product -> warn.
       if (parsed.gtin !== active.gtin || parsed.fingerprint !== active.fingerprint) {
+        sheetGateRef.current = true;
         setLabelIssue({ parsed });
         return;
       }
 
       // Same product. Weight guardrail before committing.
       if (warnings.length) {
+        sheetGateRef.current = true;
         setWeightPending({ parsed, warnings, productName: active.product });
         return;
       }
       commitScanned(parsed);
     },
-    [session, pending, labelIssue, weightPending, manualOpen, view, profiles, scanWeightWarnings, commitScanned, showToast],
+    [session, boot, view, profiles, scanWeightWarnings, commitScanned, showToast],
   );
 
   /**
-   * Single entry point for OCR reads (camera loop + dev simulate). Auto-accepts
-   * a read that passes every check; interrupts only when one fails.
+   * Single entry point for OCR reads (camera loop + test feed). Auto-accepts a
+   * read that passes every check; interrupts only when one fails.
    */
   const handleOcrRead = useCallback(
     ({ text, confidence }: OcrRead) => {
-      if (!session || pending || labelIssue || weightPending || manualOpen || view === 'summary') return;
+      if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
       if (Date.now() < ocrCooldownUntilRef.current) return;
 
-      // Not weight-shaped at all -> keep silently scanning (like an undecoded frame).
+      // Not weight-shaped at all -> keep silently scanning.
       const w = parseWeightText(text);
       if (!w) return;
 
@@ -266,16 +362,29 @@ export default function App() {
         return;
       }
 
-      const kg = toKg(w.value, w.unit);
-      // Checks 2 + 3: range (after lb->kg) and expected decimal shape.
-      const warnings = weightWarnings({ weightKg: kg, hasDecimal: w.hasDecimal, requireDecimal: true });
       const active = session.products.find((p) => p.id === session.activeProductId) ?? null;
+
+      // Check 2: the unit must have been READ, not guessed — a lb label read
+      // without its unit would otherwise enter as kg, off by 2.2x. When
+      // guessed, default to the product's known unit and force a confirm.
+      let unit = w.unit;
+      const warnings: string[] = [];
+      if (!w.unitExplicit) {
+        const productUnit = active ? productCartons(active).at(-1)?.unit : undefined;
+        unit = productUnit ?? w.unit;
+        warnings.push(`Unit not read from the label — assumed ${unit}. Confirm against the carton.`);
+      }
+
+      const kg = toKg(w.value, unit);
+      // Checks 3 + 4: range (after lb->kg) and expected decimal shape.
+      warnings.push(...weightWarnings({ weightKg: kg, hasDecimal: w.hasDecimal, requireDecimal: true }));
 
       // First carton of a (new) product via OCR -> product confirm (safety rule
       // applies to every product regardless of capture mode).
       if (!active) {
+        sheetGateRef.current = true;
         setPending({
-          parsed: ocrToParsed({ value: w.value, unit: w.unit, text }),
+          parsed: ocrToParsed({ value: w.value, unit, text }),
           product: '',
           isNewGtin: false,
           weightWarnings: warnings,
@@ -286,8 +395,9 @@ export default function App() {
 
       if (warnings.length) {
         signalError();
+        sheetGateRef.current = true;
         setWeightPending({
-          ocr: { value: w.value, unit: w.unit, kg, text },
+          ocr: { value: w.value, unit, kg, text },
           warnings,
           productName: active.product,
         });
@@ -295,20 +405,19 @@ export default function App() {
       }
 
       // All checks passed -> auto-capture. Beep, tally, next carton.
-      commitOcr({ value: w.value, unit: w.unit, kg, text });
+      commitOcr({ value: w.value, unit, kg, text });
     },
-    [session, pending, labelIssue, weightPending, manualOpen, view, commitOcr],
+    [session, boot, view, commitOcr],
   );
 
-  /** Confirm the first carton of a new product (creates product + pallet 1). */
+  /** Confirm the first carton of a product: create it (pallet 1), or continue
+   *  an existing product with the same GTIN on a new pallet. */
   const confirmPending = useCallback(
     (productName: string) => {
       if (!pending) return;
-      const { parsed, entry } = pending;
+      const { parsed, entry, resumeProductId } = pending;
       const gtin = parsed.gtin ?? ''; // '' for OCR-started products (no barcode)
-      const productId = uid();
-      const palletId = uid();
-      setSession((prev) => {
+      setSessionState((prev) => {
         if (!prev) return prev;
         const record = toCartonRecord(parsed, {
           scannedBy,
@@ -318,6 +427,31 @@ export default function App() {
           product: productName,
           entry,
         });
+
+        const existing = resumeProductId ? prev.products.find((p) => p.id === resumeProductId) : undefined;
+        if (existing) {
+          const palletId = uid();
+          return {
+            ...prev,
+            products: prev.products.map((p) =>
+              p.id === existing.id
+                ? {
+                    ...p,
+                    product: productName,
+                    pallets: [
+                      ...p.pallets,
+                      { id: palletId, number: nextPalletNumber(p), startedAt: new Date().toISOString(), cartons: [record] },
+                    ],
+                  }
+                : p,
+            ),
+            activeProductId: existing.id,
+            activePalletId: palletId,
+          };
+        }
+
+        const productId = uid();
+        const palletId = uid();
         return {
           ...prev,
           products: [
@@ -328,7 +462,7 @@ export default function App() {
               gtin,
               fingerprint: parsed.fingerprint ?? '',
               startedAt: new Date().toISOString(),
-              pallets: [{ id: palletId, startedAt: new Date().toISOString(), cartons: [record] }],
+              pallets: [{ id: palletId, number: 1, startedAt: new Date().toISOString(), cartons: [record] }],
             },
           ],
           activeProductId: productId,
@@ -340,7 +474,7 @@ export default function App() {
           upsertProfile({
             gtin,
             productName,
-            supplierName: session?.supplier ?? '',
+            supplierName: sessionRef.current?.supplier ?? '',
             fingerprint: parsed.fingerprint ?? '',
             updatedAt: new Date().toISOString(),
           }),
@@ -351,10 +485,10 @@ export default function App() {
       if (entry === 'ocr') ocrCooldownUntilRef.current = Date.now() + OCR_SUCCESS_COOLDOWN_MS;
       setPending(null);
     },
-    [pending, scannedBy, session, setSession, showToast],
+    [pending, scannedBy, showToast],
   );
 
-  // --- label-change resolutions -------------------------------------------
+  // --- label-change resolutions ---------------------------------------------
 
   const labelAddAnyway = useCallback(() => {
     if (!labelIssue || !session) return;
@@ -364,6 +498,7 @@ export default function App() {
     if (!active) return;
     const warnings = scanWeightWarnings(parsed);
     if (warnings.length) {
+      sheetGateRef.current = true;
       setWeightPending({ parsed, warnings, productName: active.product });
       return;
     }
@@ -377,19 +512,22 @@ export default function App() {
     const { parsed } = labelIssue;
     const gtin = parsed.gtin!;
     const profile = profiles[gtin];
-    setSession((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
+    const existing = sessionRef.current?.products.find((p) => p.gtin === gtin);
+    setSessionState((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
     setLabelIssue(null);
     setMode('barcode');
+    sheetGateRef.current = true;
     setPending({
       parsed,
-      product: profile?.productName ?? '',
+      product: existing?.product ?? profile?.productName ?? '',
       isNewGtin: !profile,
       weightWarnings: weightWarnings({ weightKg: parsed.weightKg ?? 0 }),
       entry: 'scan',
+      resumeProductId: existing?.id,
     });
-  }, [labelIssue, profiles, setSession]);
+  }, [labelIssue, profiles]);
 
-  // --- weight confirmation (captured, non-first carton) --------------------
+  // --- weight confirmation (captured, non-first carton) -----------------------
 
   const confirmWeight = useCallback(() => {
     if (!weightPending) return;
@@ -398,33 +536,40 @@ export default function App() {
     setWeightPending(null);
   }, [weightPending, commitScanned, commitOcr]);
 
-  // --- pallet / product / session controls --------------------------------
+  // --- pallet / product / session controls ------------------------------------
 
-  /** New pallet, same product: drop the active pallet so the next carton starts one. */
   const newPallet = useCallback(() => {
-    setSession((prev) => (prev ? { ...prev, activePalletId: null } : prev));
+    setSessionState((prev) => (prev ? { ...prev, activePalletId: null } : prev));
     lastDecodeRef.current = { raw: '', time: 0 };
-  }, [setSession]);
+  }, []);
 
   const nextProduct = useCallback(() => {
-    setSession((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
+    setSessionState((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
     lastDecodeRef.current = { raw: '', time: 0 };
     setMode('barcode'); // OCR is opted into per product
-  }, [setSession]);
+  }, []);
 
   const addManualCarton = useCallback(
     (input: ManualEntryInput) => {
-      setSession((prev) => {
+      const cur = sessionRef.current;
+      const active = cur?.products.find((p) => p.id === cur.activeProductId);
+      if (!cur || !active) {
+        signalError();
+        showToast('No active product — carton NOT counted', 'error');
+        setManualOpen(false);
+        return;
+      }
+      setSessionState((prev) => {
         if (!prev) return prev;
-        const active = prev.products.find((p) => p.id === prev.activeProductId);
-        if (!active) return prev;
+        const activeNow = prev.products.find((p) => p.id === prev.activeProductId);
+        if (!activeNow) return prev;
         const record = toManualCartonRecord(input, {
           scannedBy,
           poRef: prev.poRef,
           supplier: prev.supplier,
           brand: prev.brand,
-          product: active.product,
-          gtin: active.gtin,
+          product: activeNow.product,
+          gtin: activeNow.gtin,
         });
         return withCartonAppended(prev, record);
       });
@@ -432,38 +577,36 @@ export default function App() {
       showToast(`Added ${roundKg(toKg(input.netWeight, input.unit)).toFixed(2)} kg (manual)`, 'info');
       setManualOpen(false);
     },
-    [scannedBy, setSession, showToast],
+    [scannedBy, showToast],
   );
 
-  /** Remove a carton; prune empty pallets and products; fix active pointers. */
-  const removeCarton = useCallback(
-    (cartonId: string) => {
-      setSession((prev) => {
-        if (!prev) return prev;
-        const products = prev.products
-          .map((p) => ({
-            ...p,
-            pallets: p.pallets
-              .map((pl) => ({ ...pl, cartons: pl.cartons.filter((c) => c.id !== cartonId) }))
-              .filter((pl) => pl.cartons.length > 0),
-          }))
-          .filter((p) => p.pallets.length > 0);
-        const productOk = products.some((p) => p.id === prev.activeProductId);
-        const palletOk = products.some((p) => p.pallets.some((pl) => pl.id === prev.activePalletId));
-        return {
-          ...prev,
-          products,
-          activeProductId: productOk ? prev.activeProductId : null,
-          activePalletId: palletOk ? prev.activePalletId : null,
-        };
-      });
-    },
-    [setSession],
-  );
+  /** Remove a carton; prune empty pallets and products; fix active pointers.
+   *  Pallet numbers are fixed at creation, so no renumbering happens here. */
+  const removeCarton = useCallback((cartonId: string) => {
+    setSessionState((prev) => {
+      if (!prev) return prev;
+      const products = prev.products
+        .map((p) => ({
+          ...p,
+          pallets: p.pallets
+            .map((pl) => ({ ...pl, cartons: pl.cartons.filter((c) => c.id !== cartonId) }))
+            .filter((pl) => pl.cartons.length > 0),
+        }))
+        .filter((p) => p.pallets.length > 0);
+      const productOk = products.some((p) => p.id === prev.activeProductId);
+      const palletOk = products.some((p) => p.pallets.some((pl) => pl.id === prev.activePalletId));
+      return {
+        ...prev,
+        products,
+        activeProductId: productOk ? prev.activeProductId : null,
+        activePalletId: palletOk ? prev.activePalletId : null,
+      };
+    });
+  }, []);
 
   const startSession = useCallback(
     (poRef: string, supplier: string, brand: string | undefined) => {
-      setSession({
+      setSessionState({
         id: uid(),
         poRef,
         supplier,
@@ -477,62 +620,106 @@ export default function App() {
       setView('scan');
       setMode('barcode');
     },
-    [scannedBy, setSession],
+    [scannedBy],
   );
 
-  const endSession = useCallback(() => {
-    setSession(null);
+  /** Finish the receival: save to history, then clear the active session.
+   *  On save failure the session is KEPT — nothing is lost. */
+  const finishSession = useCallback(async () => {
+    const cur = sessionRef.current;
+    if (!cur || allCartons(cur).length === 0) return;
+    try {
+      await saveReceival(cur);
+      setSessionState(null);
+      setSettingsOpen(false);
+      setView('scan');
+      setMode('barcode');
+      lastDecodeRef.current = { raw: '', time: 0 };
+      showToast(`Saved ${cur.poRef} to history`, 'info');
+    } catch (err) {
+      showToast(`Save failed — session kept. ${String(err)}`, 'error');
+    }
+  }, [showToast]);
+
+  /** Discard the session without saving (user-confirmed in the UI). */
+  const discardSession = useCallback(() => {
+    setSessionState(null);
     setSettingsOpen(false);
     setView('scan');
     setMode('barcode');
     lastDecodeRef.current = { raw: '', time: 0 };
-  }, [setSession]);
+  }, []);
 
   const handleExport = useCallback(async () => {
-    if (!session || allCartons(session).length === 0) {
+    const cur = sessionRef.current;
+    if (!cur || allCartons(cur).length === 0) {
       showToast('Nothing to export yet', 'warn');
       return;
     }
     try {
-      const filename = await exportSessionToXlsx(session);
+      const filename = await exportSessionToXlsx(cur);
       showToast(`Exported ${filename}`, 'info');
     } catch (err) {
       showToast(`Export failed: ${String(err)}`, 'error');
     }
-  }, [session, showToast]);
+  }, [showToast]);
 
-  const amendProduct = useCallback(
-    (productId: string) => {
-      setSession((prev) => {
-        if (!prev) return prev;
-        const product = prev.products.find((p) => p.id === productId);
-        return { ...prev, activeProductId: productId, activePalletId: product?.pallets.at(-1)?.id ?? null };
-      });
-      lastDecodeRef.current = { raw: '', time: 0 };
-      setMode('barcode');
-      setView('scan');
-    },
-    [setSession],
-  );
-
-  const amendPallet = useCallback(
-    (productId: string, palletId: string) => {
-      setSession((prev) => (prev ? { ...prev, activeProductId: productId, activePalletId: palletId } : prev));
-      lastDecodeRef.current = { raw: '', time: 0 };
-      setMode('barcode');
-      setView('scan');
-    },
-    [setSession],
-  );
-
-  const captureNewProduct = useCallback(() => {
-    setSession((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
+  const amendProduct = useCallback((productId: string) => {
+    setSessionState((prev) => {
+      if (!prev) return prev;
+      const product = prev.products.find((p) => p.id === productId);
+      return { ...prev, activeProductId: productId, activePalletId: product?.pallets.at(-1)?.id ?? null };
+    });
     lastDecodeRef.current = { raw: '', time: 0 };
     setMode('barcode');
     setView('scan');
-  }, [setSession]);
+  }, []);
 
-  // --- screens ------------------------------------------------------------
+  const amendPallet = useCallback((productId: string, palletId: string) => {
+    setSessionState((prev) => (prev ? { ...prev, activeProductId: productId, activePalletId: palletId } : prev));
+    lastDecodeRef.current = { raw: '', time: 0 };
+    setMode('barcode');
+    setView('scan');
+  }, []);
+
+  const captureNewProduct = useCallback(() => {
+    setSessionState((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
+    lastDecodeRef.current = { raw: '', time: 0 };
+    setMode('barcode');
+    setView('scan');
+  }, []);
+
+  // --- screens ---------------------------------------------------------------
+
+  const persistBanner = persistError ? (
+    <div className="fixed inset-x-0 top-0 z-[70] bg-rose-600 px-4 py-2 text-center text-sm font-bold text-white">
+      ⚠ NOT SAVING to device storage — keep the app open and export your data now.
+    </div>
+  ) : null;
+
+  if (boot === 'loading') {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-sm text-slate-400">
+        Loading…
+      </div>
+    );
+  }
+
+  if (boot === 'resume' && session) {
+    return (
+      <>
+        {persistBanner}
+        <ResumePrompt
+          session={session}
+          onResume={() => setBoot('ready')}
+          onDiscard={() => {
+            setSessionState(null);
+            setBoot('ready');
+          }}
+        />
+      </>
+    );
+  }
 
   if (!scannedBy || editingName) {
     return (
@@ -546,21 +733,39 @@ export default function App() {
     );
   }
 
+  if (screen === 'history') {
+    return <HistoryScreen onBack={() => setScreen('main')} />;
+  }
+
   if (!session) {
-    return <SessionSetup scannedBy={scannedBy} onStart={startSession} onEditName={() => setEditingName(true)} />;
+    return (
+      <>
+        {persistBanner}
+        <SessionSetup
+          scannedBy={scannedBy}
+          onStart={startSession}
+          onEditName={() => setEditingName(true)}
+          onHistory={() => setScreen('history')}
+        />
+      </>
+    );
   }
 
   if (view === 'summary') {
     return (
-      <SummaryScreen
-        session={session}
-        onAmendProduct={amendProduct}
-        onAmendPallet={amendPallet}
-        onCaptureNewProduct={captureNewProduct}
-        onBackToScan={() => setView('scan')}
-        onExport={handleExport}
-        onEndSession={endSession}
-      />
+      <>
+        {persistBanner}
+        <SummaryScreen
+          session={session}
+          onAmendProduct={amendProduct}
+          onAmendPallet={amendPallet}
+          onCaptureNewProduct={captureNewProduct}
+          onBackToScan={() => setView('scan')}
+          onExport={handleExport}
+          onFinish={finishSession}
+          onDiscard={discardSession}
+        />
+      </>
     );
   }
 
@@ -569,16 +774,17 @@ export default function App() {
   const totals = poTotals(session);
   const prodSub = activeProduct ? productSubtotal(activeProduct) : { count: 0, kg: 0 };
   const palSub = activePallet ? palletSubtotal(activePallet) : { count: 0, kg: 0 };
-  const palletNumber = activeProduct
-    ? activePallet
-      ? activeProduct.pallets.findIndex((pl) => pl.id === activePallet.id) + 1
-      : activeProduct.pallets.length + 1
-    : 1;
+  const palletNumber = activePallet
+    ? activePallet.number
+    : activeProduct
+      ? nextPalletNumber(activeProduct)
+      : 1;
   const lastBatch = activeProduct ? productCartons(activeProduct).at(-1)?.batch : undefined;
   const canNewPallet = !!activeProduct && !!activePallet && activePallet.cartons.length > 0;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-3">
+      {persistBanner}
       <header className="flex items-center justify-between">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-slate-100">{session.poRef}</div>
@@ -697,7 +903,9 @@ export default function App() {
         </button>
       </div>
 
-      <DevPanel onSimulate={handleDecode} onSimulateOcr={(text, confidence) => handleOcrRead({ text, confidence })} />
+      {devTools && (
+        <DevPanel onSimulate={handleDecode} onSimulateOcr={(text, confidence) => handleOcrRead({ text, confidence })} />
+      )}
 
       {activePallet ? (
         <CartonList cartons={activePallet.cartons} onRemove={removeCarton} />
@@ -758,11 +966,15 @@ export default function App() {
         <SettingsMenu
           scannedBy={scannedBy}
           poRef={session.poRef}
+          devTools={devTools}
+          onToggleDevTools={setDevTools}
           onChangeName={(name) => {
             setScannedBy(name);
+            // Keep the session-level name in sync (it feeds the export summary).
+            setSessionState((prev) => (prev ? { ...prev, scannedBy: name } : prev));
             showToast('Name updated', 'info');
           }}
-          onEndSession={endSession}
+          onEndSession={discardSession}
           onClose={() => setSettingsOpen(false)}
         />
       )}

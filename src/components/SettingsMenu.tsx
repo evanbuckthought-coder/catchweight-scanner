@@ -3,15 +3,19 @@ import { useState } from 'react';
 interface SettingsMenuProps {
   scannedBy: string;
   poRef: string;
+  devTools: boolean;
+  onToggleDevTools: (on: boolean) => void;
   onChangeName: (name: string) => void;
   onEndSession: () => void;
   onClose: () => void;
 }
 
-/** Small settings sheet: edit operator name, end the current session. */
+/** Small settings sheet: edit operator name, test tools, end the current session. */
 export function SettingsMenu({
   scannedBy,
   poRef,
+  devTools,
+  onToggleDevTools,
   onChangeName,
   onEndSession,
   onClose,
@@ -46,6 +50,33 @@ export function SettingsMenu({
               Save
             </button>
           </div>
+        </label>
+
+        {/* Test tools are OFF by default in production so a stray tap can't
+            insert a simulated carton into a real receiving session. */}
+        <label className="mt-4 flex items-center justify-between rounded-xl bg-slate-800/60 px-3 py-3 ring-1 ring-slate-700">
+          <span className="text-sm font-medium text-slate-300">
+            Test tools
+            <span className="block text-xs font-normal text-slate-500">
+              Simulated scans / OCR feeds (for demos — not for real receiving)
+            </span>
+          </span>
+          <button
+            type="button"
+            data-testid="toggle-devtools"
+            role="switch"
+            aria-checked={devTools}
+            onClick={() => onToggleDevTools(!devTools)}
+            className={`h-7 w-12 shrink-0 rounded-full p-0.5 transition-colors ${
+              devTools ? 'bg-emerald-500' : 'bg-slate-600'
+            }`}
+          >
+            <span
+              className={`block h-6 w-6 rounded-full bg-white transition-transform ${
+                devTools ? 'translate-x-5' : ''
+              }`}
+            />
+          </button>
         </label>
 
         <div className="mt-6">

@@ -75,6 +75,24 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     };
   }, [active, retryNonce]);
 
+  // Recover the camera after backgrounding / phone lock: iOS ends the stream's
+  // tracks, leaving a black view. When the app returns to the foreground and
+  // the track is dead, bounce the lifecycle effect to restart the stream.
+  useEffect(() => {
+    if (!active) return;
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      // Small delay: iOS briefly reports tracks muted right at resume.
+      setTimeout(() => {
+        const tracks = streamRef.current?.getVideoTracks() ?? [];
+        const dead = tracks.length === 0 || tracks.some((t) => t.readyState === 'ended');
+        if (dead) setRetryNonce((n) => n + 1);
+      }, 400);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [active]);
+
   // Lazy-load the OCR engine the first time OCR mode is enabled.
   useEffect(() => {
     if (mode !== 'ocr' || !active || ocrStatus === 'ready' || ocrStatus === 'loading') return;
@@ -115,14 +133,23 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     if (!video) return;
     let stopped = false;
     const canvas = document.createElement('canvas');
+    let consecutiveErrors = 0;
     (async () => {
       while (!stopped) {
         try {
           const read = await recognizeVideoRegion(video, canvas);
+          consecutiveErrors = 0;
           if (stopped) break;
           if (read && read.text) onOcrRead(read);
         } catch (err) {
           console.warn('OCR tick failed:', err);
+          // A dead worker would otherwise spin (and burn battery) forever;
+          // after repeated failures surface the error state with its Retry.
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= 5) {
+            if (!stopped) setOcrStatus('error');
+            break;
+          }
         }
         await new Promise((r) => setTimeout(r, 300));
       }

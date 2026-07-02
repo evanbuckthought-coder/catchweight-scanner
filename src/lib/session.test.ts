@@ -33,7 +33,7 @@ function carton(over: Partial<CartonRecord>): CartonRecord {
 }
 
 function pallet(id: string, cartons: CartonRecord[], palletId?: string): Pallet {
-  return { id, palletId, startedAt: '2026-06-22T09:00:00.000Z', cartons };
+  return { id, number: 1, palletId, startedAt: '2026-06-22T09:00:00.000Z', cartons };
 }
 
 function product(id: string, pallets: Pallet[]): SessionProduct {
@@ -99,14 +99,30 @@ describe('pallet + product + PO aggregation', () => {
 });
 
 describe('dedupe', () => {
-  const cartons = [carton({ gtin: 'G1', traceId: 'T1' }), carton({ gtin: 'G2', traceId: 'T2' })];
-  it('finds an exact gtin+trace re-scan', () => {
-    expect(findDuplicate(cartons, 'G1', 'T1')).toBeDefined();
+  const serialCarton = carton({ gtin: 'G1', serial: 'S1', raw: '(01)G1(3102)002113(21)S1' });
+  const batchA = carton({ gtin: 'G2', batch: 'B1', raw: '(01)G2(3102)000705(10)B1' });
+  const batchB = carton({ gtin: 'G2', batch: 'B1', raw: '(01)G2(3102)000712(10)B1' });
+  const manualCarton = carton({ gtin: 'G2', batch: 'B1', raw: '', entry: 'manual' });
+  const cartons = [serialCarton, batchA, batchB, manualCarton];
+
+  it('hard-dedupes on gtin + serial', () => {
+    expect(findDuplicate(cartons, { gtin: 'G1', serial: 'S1', raw: 'anything' })).toBe(serialCarton);
   });
-  it('different trace id is not a duplicate', () => {
-    expect(findDuplicate(cartons, 'G1', 'T9')).toBeUndefined();
+  it('a different serial on the same gtin is not a duplicate', () => {
+    expect(findDuplicate(cartons, { gtin: 'G1', serial: 'S9', raw: 'x' })).toBeUndefined();
   });
-  it('no trace id never dedupes', () => {
-    expect(findDuplicate(cartons, 'G1', undefined)).toBeUndefined();
+  it('batch-only: a second carton of the SAME batch with a different weight is NOT a duplicate', () => {
+    // This is the critical case: batches are shared across cartons.
+    expect(
+      findDuplicate([batchA], { gtin: 'G2', serial: undefined, raw: '(01)G2(3102)000712(10)B1' }),
+    ).toBeUndefined();
+  });
+  it('batch-only: an identical full raw string (true re-scan) IS a duplicate', () => {
+    expect(
+      findDuplicate(cartons, { gtin: 'G2', serial: undefined, raw: '(01)G2(3102)000705(10)B1' }),
+    ).toBe(batchA);
+  });
+  it('manual/OCR cartons (empty raw) never match raw-dedupe', () => {
+    expect(findDuplicate([manualCarton], { gtin: 'G2', serial: undefined, raw: '' })).toBeUndefined();
   });
 });

@@ -33,7 +33,15 @@ export function preloadOcr(): Promise<TesseractWorker> {
   if (!workerPromise) {
     workerPromise = (async () => {
       const { createWorker, PSM } = await import('tesseract.js');
-      const worker = await createWorker('eng');
+      // Self-hosted engine assets (copied from the tesseract.js / .js-core /
+      // @tesseract.js-data packages into public/tesseract). Same-origin means
+      // the service worker caches them after first use, so OCR mode keeps
+      // working offline in warehouse dead-zones — no CDN dependency.
+      const worker = await createWorker('eng', undefined, {
+        workerPath: '/tesseract/worker.min.js',
+        corePath: '/tesseract/core',
+        langPath: '/tesseract/lang',
+      });
       await worker.setParameters({
         // The weight is one printed line; constrain the page-seg model to match.
         tessedit_pageseg_mode: PSM.SINGLE_LINE,
@@ -89,6 +97,12 @@ export interface OcrWeight {
   unit: WeightUnit;
   /** True when the read value carried a decimal point (expected catchweight shape). */
   hasDecimal: boolean;
+  /**
+   * True when a unit token (kg/lb/#) was actually read from the label. When
+   * false the unit is a GUESS — the caller must not auto-accept (a lb label
+   * read without its unit would otherwise enter the tally as kg, off by 2.2x).
+   */
+  unitExplicit: boolean;
 }
 
 /**
@@ -109,6 +123,7 @@ export function parseWeightText(text: string): OcrWeight | null {
 
   let numStr: string | undefined;
   let unit: WeightUnit;
+  let unitExplicit = true;
 
   const nearUnit = cleaned.match(/(?<!\d)(\d{1,4}(?:\.\d*)?)\s*(kg|lbs?|#)/i);
   if (nearUnit) {
@@ -118,12 +133,19 @@ export function parseWeightText(text: string): OcrWeight | null {
     const all = [...cleaned.matchAll(/(?<!\d)\d{1,4}(?:\.\d*)?(?!\d)/g)].map((m) => m[0]);
     if (all.length === 0) return null;
     numStr = all.find((s) => s.includes('.')) ?? all[0];
-    unit = /lb/i.test(cleaned) ? 'lb' : 'kg';
+    if (/lb/i.test(cleaned)) {
+      unit = 'lb';
+    } else if (/kg/i.test(cleaned)) {
+      unit = 'kg';
+    } else {
+      unit = 'kg'; // guess — flagged so the caller forces a confirmation
+      unitExplicit = false;
+    }
   }
 
   const value = Number.parseFloat(numStr);
   if (!Number.isFinite(value) || value <= 0) return null;
-  return { value, unit, hasDecimal: numStr.includes('.') };
+  return { value, unit, hasDecimal: numStr.includes('.'), unitExplicit };
 }
 
 /**
