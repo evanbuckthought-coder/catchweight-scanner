@@ -110,7 +110,10 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
       })
       .catch((err) => {
         console.warn('OCR engine failed to load:', err);
-        if (!cancelled) setOcrStatus('error');
+        if (!cancelled) {
+          setOcrLoadMsg(err instanceof Error ? err.message : String(err));
+          setOcrStatus('error');
+        }
       })
       .finally(() => {
         onOcrProgress(null);
@@ -214,9 +217,9 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
           <button
             type="button"
             onClick={() => setOcrStatus('idle')}
-            className="pointer-events-auto rounded-full bg-rose-500/90 px-4 py-1.5 text-xs font-semibold text-white"
+            className="pointer-events-auto max-w-[92%] rounded-full bg-rose-500/90 px-4 py-1.5 text-xs font-semibold text-white"
           >
-            OCR engine failed to load — tap to retry
+            OCR engine failed{ocrLoadMsg ? ` (${ocrLoadMsg})` : ''} — tap to retry
           </button>
         </div>
       )}

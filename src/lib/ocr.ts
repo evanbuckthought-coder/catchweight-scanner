@@ -58,14 +58,22 @@ export function preloadOcr(): Promise<TesseractWorker> {
         // working offline in warehouse dead-zones — no CDN dependency.
         //
         // IMPORTANT: these must be FULL absolute URLs (with origin), not bare
-        // paths. tesseract.js bootstraps its worker from a blob: URL, and
-        // path-absolute references cannot be resolved against a blob: base —
-        // a bare "/tesseract/..." makes the load hang forever.
+        // paths, so they resolve identically from any worker context.
         const abs = (path: string) => new URL(path, window.location.origin).href;
+        progressListener?.('starting engine worker');
         const worker = await createWorker('eng', undefined, {
           workerPath: abs('/tesseract/worker.min.js'),
           corePath: abs('/tesseract/core'),
           langPath: abs('/tesseract/lang'),
+          // iOS/WebKit: tesseract's default blob-URL worker bootstrap fails
+          // SILENTLY in service-worker-controlled pages (installed PWAs) — the
+          // worker never starts and the load hangs with zero progress. Load
+          // the worker script directly from its same-origin URL instead.
+          workerBlobURL: false,
+          errorHandler: (err: unknown) => {
+            console.warn('OCR worker error:', err);
+            progressListener?.(`worker error: ${String(err)}`);
+          },
           logger: (m: { status?: string; progress?: number }) => {
             if (m?.status && progressListener) {
               const pct = typeof m.progress === 'number' ? ` ${Math.round(m.progress * 100)}%` : '';
