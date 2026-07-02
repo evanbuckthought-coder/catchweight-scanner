@@ -6,7 +6,7 @@ import {
   startCamera,
   stopCamera,
 } from '../lib/scanner';
-import { preloadOcr, recognizeVideoRegion, type OcrRead } from '../lib/ocr';
+import { onOcrProgress, preloadOcr, recognizeVideoRegion, type OcrRead } from '../lib/ocr';
 
 export type ScanMode = 'barcode' | 'ocr';
 
@@ -93,11 +93,17 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [active]);
 
+  const [ocrLoadMsg, setOcrLoadMsg] = useState('');
+
   // Lazy-load the OCR engine the first time OCR mode is enabled.
   useEffect(() => {
     if (mode !== 'ocr' || !active || ocrStatus === 'ready' || ocrStatus === 'loading') return;
     let cancelled = false;
     setOcrStatus('loading');
+    setOcrLoadMsg('');
+    onOcrProgress((msg) => {
+      if (!cancelled) setOcrLoadMsg(msg);
+    });
     preloadOcr()
       .then(() => {
         if (!cancelled) setOcrStatus('ready');
@@ -105,9 +111,13 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
       .catch((err) => {
         console.warn('OCR engine failed to load:', err);
         if (!cancelled) setOcrStatus('error');
+      })
+      .finally(() => {
+        onOcrProgress(null);
       });
     return () => {
       cancelled = true;
+      onOcrProgress(null);
     };
   }, [mode, active, ocrStatus]);
 
@@ -192,7 +202,7 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
           )}
           {ocrStatus === 'loading' && (
             <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
-              Loading OCR engine…
+              Loading OCR engine…{ocrLoadMsg ? ` (${ocrLoadMsg})` : ''}
             </span>
           )}
         </div>

@@ -28,29 +28,62 @@ export const OCR_REGION = { widthFrac: 0.72, heightFrac: 0.2 };
 
 let workerPromise: Promise<TesseractWorker> | null = null;
 
+/** Optional listener for engine-load progress (shown in the loading UI). */
+let progressListener: ((message: string) => void) | null = null;
+export function onOcrProgress(listener: ((message: string) => void) | null): void {
+  progressListener = listener;
+}
+
+/** Max time the engine load may take before it fails with a retryable error. */
+const OCR_LOAD_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('OCR engine load timed out — check connection and retry')), ms),
+    ),
+  ]);
+}
+
 /** Lazy-create the shared Tesseract worker. Failure resets so retry works. */
 export function preloadOcr(): Promise<TesseractWorker> {
   if (!workerPromise) {
-    workerPromise = (async () => {
-      const { createWorker, PSM } = await import('tesseract.js');
-      // Self-hosted engine assets (copied from the tesseract.js / .js-core /
-      // @tesseract.js-data packages into public/tesseract). Same-origin means
-      // the service worker caches them after first use, so OCR mode keeps
-      // working offline in warehouse dead-zones — no CDN dependency.
-      const worker = await createWorker('eng', undefined, {
-        workerPath: '/tesseract/worker.min.js',
-        corePath: '/tesseract/core',
-        langPath: '/tesseract/lang',
-      });
-      await worker.setParameters({
-        // The weight is one printed line; constrain the page-seg model to match.
-        tessedit_pageseg_mode: PSM.SINGLE_LINE,
-        // Whitelist is best-effort (ignored by the LSTM engine on some builds);
-        // parseWeightText() re-filters, so this is belt-and-braces only.
-        tessedit_char_whitelist: '0123456789.,kglbsKGLBS# ',
-      });
-      return worker;
-    })().catch((err) => {
+    workerPromise = withTimeout(
+      (async () => {
+        const { createWorker, PSM } = await import('tesseract.js');
+        // Self-hosted engine assets (copied from the tesseract.js / .js-core /
+        // @tesseract.js-data packages into public/tesseract). Same-origin means
+        // the service worker caches them after first use, so OCR mode keeps
+        // working offline in warehouse dead-zones — no CDN dependency.
+        //
+        // IMPORTANT: these must be FULL absolute URLs (with origin), not bare
+        // paths. tesseract.js bootstraps its worker from a blob: URL, and
+        // path-absolute references cannot be resolved against a blob: base —
+        // a bare "/tesseract/..." makes the load hang forever.
+        const abs = (path: string) => new URL(path, window.location.origin).href;
+        const worker = await createWorker('eng', undefined, {
+          workerPath: abs('/tesseract/worker.min.js'),
+          corePath: abs('/tesseract/core'),
+          langPath: abs('/tesseract/lang'),
+          logger: (m: { status?: string; progress?: number }) => {
+            if (m?.status && progressListener) {
+              const pct = typeof m.progress === 'number' ? ` ${Math.round(m.progress * 100)}%` : '';
+              progressListener(`${m.status}${pct}`);
+            }
+          },
+        });
+        await worker.setParameters({
+          // The weight is one printed line; constrain the page-seg model to match.
+          tessedit_pageseg_mode: PSM.SINGLE_LINE,
+          // Whitelist is best-effort (ignored by the LSTM engine on some builds);
+          // parseWeightText() re-filters, so this is belt-and-braces only.
+          tessedit_char_whitelist: '0123456789.,kglbsKGLBS# ',
+        });
+        return worker;
+      })(),
+      OCR_LOAD_TIMEOUT_MS,
+    ).catch((err) => {
       workerPromise = null; // allow a retry after e.g. a network failure
       throw err;
     });
