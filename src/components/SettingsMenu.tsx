@@ -1,5 +1,25 @@
 import { useState } from 'react';
 
+/**
+ * Force-refresh the app: check for a new service worker, drop every runtime
+ * cache, and hard-reload. Escape hatch for a stuck/stale installed PWA.
+ * Session data lives in IndexedDB and localStorage — untouched by this.
+ */
+async function checkForUpdate(): Promise<void> {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    await reg?.update();
+    if (typeof caches !== 'undefined') {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch (err) {
+    console.warn('Update check failed:', err);
+  } finally {
+    window.location.reload();
+  }
+}
+
 interface SettingsMenuProps {
   scannedBy: string;
   poRef: string;
@@ -120,6 +140,18 @@ export function SettingsMenu({
         >
           Close
         </button>
+
+        <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
+          <span data-testid="build-id">Build {__BUILD_ID__}</span>
+          <button
+            type="button"
+            data-testid="check-update"
+            onClick={checkForUpdate}
+            className="rounded-lg bg-slate-800 px-3 py-1.5 font-medium text-slate-400 ring-1 ring-slate-700"
+          >
+            ⟳ Check for app update
+          </button>
+        </div>
       </div>
     </div>
   );

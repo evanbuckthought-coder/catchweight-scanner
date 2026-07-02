@@ -82,6 +82,7 @@ export function SessionSetup({ scannedBy, onStart, onEditName, onHistory }: Sess
         >
           Start session
         </button>
+        <p className="text-center text-[11px] text-slate-600">Build {__BUILD_ID__}</p>
       </div>
     </div>
   );

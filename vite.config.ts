@@ -10,7 +10,15 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 // as the default so localhost dev / automated preview keeps working.
 const useHttps = !!process.env.HTTPS;
 
+// Visible build stamp (UTC time + commit when built on Vercel) so a device's
+// running version is verifiable at a glance — stale-PWA debugging.
+const sha = process.env.VERCEL_GIT_COMMIT_SHA;
+const buildId = `${new Date().toISOString().slice(0, 16).replace('T', ' ')}Z${sha ? ` · ${sha.slice(0, 7)}` : ''}`;
+
 export default defineConfig({
+  define: {
+    __BUILD_ID__: JSON.stringify(buildId),
+  },
   plugins: [
     react(),
     tailwindcss(),
