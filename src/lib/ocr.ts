@@ -105,6 +105,94 @@ export interface OcrRead {
   confidence: number;
 }
 
+export interface OcrDiagStep {
+  step: string;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * On-device OCR self-test. Every OCR failure in this project has been
+ * iOS-PWA-specific and invisible from desktop browsers — this runs the load
+ * chain stage by stage ON THE DEVICE and reports exactly where it breaks:
+ * asset fetches (through the live service worker), raw worker spawn, then the
+ * full engine load + a synthetic recognition.
+ */
+export async function runOcrDiagnostics(onStep: (s: OcrDiagStep) => void): Promise<void> {
+  const abs = (path: string) => new URL(path, window.location.origin).href;
+
+  const timed = async (step: string, fn: () => Promise<string>): Promise<void> => {
+    const t0 = Date.now();
+    try {
+      const detail = await fn();
+      onStep({ step, ok: true, detail: `${detail} · ${((Date.now() - t0) / 1000).toFixed(1)}s` });
+    } catch (err) {
+      onStep({
+        step,
+        ok: false,
+        detail: `${err instanceof Error ? err.message : String(err)} · ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+      });
+    }
+  };
+
+  const timeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms / 1000}s`)), ms))]);
+
+  const fetchCheck = (label: string, path: string) =>
+    timed(label, async () => {
+      const r = await timeout(fetch(abs(path)), 20_000);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const buf = await timeout(r.arrayBuffer(), 20_000);
+      return `${Math.round(buf.byteLength / 1024)} KB`;
+    });
+
+  await fetchCheck('Worker script fetch', '/tesseract/worker.min.js');
+  await fetchCheck('WASM core fetch', '/tesseract/core/tesseract-core-simd-lstm.wasm.js');
+  await fetchCheck('Language data fetch', '/tesseract/lang/eng.traineddata.gz');
+
+  await timed('Worker spawn', () =>
+    new Promise<string>((resolve, reject) => {
+      let settled = false;
+      let w: Worker | null = null;
+      const done = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        fn();
+        try {
+          w?.terminate();
+        } catch {
+          /* ignore */
+        }
+      };
+      try {
+        w = new Worker(abs('/tesseract/worker.min.js'));
+        w.onerror = (e) => done(() => reject(new Error(e.message || 'worker error event')));
+        // worker.min.js sends nothing unprompted; no error event shortly after
+        // spawn means the script loaded and parsed in a real worker context.
+        setTimeout(() => done(() => resolve('spawned, no error after 3s')), 3000);
+      } catch (err) {
+        done(() => reject(err instanceof Error ? err : new Error(String(err))));
+      }
+    }),
+  );
+
+  await timed('Full engine load + test read', async () => {
+    const worker = await preloadOcr(); // has its own 60s timeout
+    const canvas = document.createElement('canvas');
+    canvas.width = 300;
+    canvas.height = 80;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no canvas 2d context');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, 300, 80);
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 40px Arial';
+    ctx.fillText('12.34 kg', 40, 55);
+    const { data } = await timeout(worker.recognize(canvas), 30_000);
+    return `read "${data.text.trim()}" @ ${Math.round(data.confidence)}%`;
+  });
+}
+
 /**
  * Crop the central capture region from the live video frame and OCR it.
  * Small frames are upscaled — Tesseract reads print better at higher dpi.

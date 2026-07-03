@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { runOcrDiagnostics, type OcrDiagStep } from '../lib/ocr';
 
 /**
  * Force-refresh the app: check for a new service worker, drop every runtime
@@ -42,6 +43,19 @@ export function SettingsMenu({
 }: SettingsMenuProps) {
   const [name, setName] = useState(scannedBy);
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [diagSteps, setDiagSteps] = useState<OcrDiagStep[] | null>(null);
+  const [diagRunning, setDiagRunning] = useState(false);
+
+  const runDiagnostics = async () => {
+    if (diagRunning) return;
+    setDiagRunning(true);
+    setDiagSteps([]);
+    try {
+      await runOcrDiagnostics((s) => setDiagSteps((prev) => [...(prev ?? []), s]));
+    } finally {
+      setDiagRunning(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60" onClick={onClose}>
@@ -140,6 +154,33 @@ export function SettingsMenu({
         >
           Close
         </button>
+
+        {/* On-device OCR self-test: pinpoints which stage of the engine load
+            fails on THIS device (iOS-PWA failures are invisible from desktop). */}
+        <div className="mt-4 rounded-xl bg-slate-800/60 p-3 ring-1 ring-slate-700">
+          <button
+            type="button"
+            data-testid="ocr-diagnostics"
+            disabled={diagRunning}
+            onClick={runDiagnostics}
+            className="w-full rounded-lg bg-slate-700 py-2.5 text-sm font-semibold text-slate-200 disabled:opacity-50"
+          >
+            {diagRunning ? 'Testing OCR engine…' : '🔍 Test OCR engine'}
+          </button>
+          {diagSteps && (
+            <ul className="mt-2 flex flex-col gap-1">
+              {diagSteps.map((s) => (
+                <li key={s.step} className="text-xs">
+                  <span className={s.ok ? 'text-emerald-400' : 'text-rose-400'}>
+                    {s.ok ? '✓' : '✗'} {s.step}
+                  </span>
+                  <span className="block break-words pl-4 text-slate-500">{s.detail}</span>
+                </li>
+              ))}
+              {diagRunning && <li className="text-xs text-slate-500">running…</li>}
+            </ul>
+          )}
+        </div>
 
         <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
           <span data-testid="build-id">Build {__BUILD_ID__}</span>

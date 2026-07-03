@@ -33,7 +33,9 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
 
   window.addEventListener('load', () => {
     navigator.serviceWorker
-      .register('/sw.js')
+      // updateViaCache 'none': the sw.js script itself is always revalidated
+      // against the network, never pinned by the HTTP cache.
+      .register('/sw.js', { updateViaCache: 'none' })
       .then((reg) => {
         reg.update().catch(() => {}); // check for a newer SW on each load
       })

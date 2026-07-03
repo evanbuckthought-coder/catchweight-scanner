@@ -2,19 +2,25 @@
  * App-shell service worker for installability + offline launch.
  *
  * Strategy:
- *   - HTML / navigation requests -> NETWORK-FIRST (fall back to cache offline).
- *     This is the important bit: the index.html is what references the hashed
- *     JS/CSS bundles, so always fetching it fresh means a new deploy is picked
- *     up immediately instead of being pinned to a stale cached shell.
- *   - Hashed static assets (/assets/*) and other GETs -> CACHE-FIRST (they are
- *     content-hashed and immutable, so this is safe and fast/offline-friendly).
+ *   - HTML / navigation requests -> NETWORK-FIRST (fall back to cache offline),
+ *     so a new deploy is picked up immediately.
+ *   - Everything else same-origin (hashed /assets, /tesseract engine files,
+ *     icons) -> CACHE-FIRST with runtime caching.
  *
- * Bump CACHE_VERSION on deploys that must hard-evict old caches.
+ * WEBKIT-CRITICAL: never use Response.clone() to tee a body into the cache.
+ * Safari stalls BOTH branches of a cloned response once the body exceeds its
+ * stream buffer (multi-MB files like the OCR wasm core / language data hang
+ * silently, mid-transfer, with no error — observed on installed iOS PWAs).
+ * Instead the body is read ONCE into an ArrayBuffer and two fresh Responses
+ * are constructed from it (read-once pattern below).
+ *
+ * Bump CACHE_VERSION on strategy changes: activation deletes every older
+ * cache, so no runtime-cached byte from a previous SW generation can survive
+ * an update (lazy chunks and engine assets included).
  */
-const CACHE_VERSION = 'catchweight-v2';
+const CACHE_VERSION = 'catchweight-v3';
 
 self.addEventListener('install', (event) => {
-  // Take over as soon as possible so updates apply on the next load.
   self.skipWaiting();
   event.waitUntil(caches.open(CACHE_VERSION));
 });
@@ -22,7 +28,6 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      // Drop every cache that isn't the current version (clears stale shells).
       const keys = await caches.keys();
       await Promise.all(keys.filter((k) => k !== CACHE_VERSION).map((k) => caches.delete(k)));
       await self.clients.claim();
@@ -30,43 +35,64 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+/**
+ * Read-once cache write: consume the body a single time, then build separate
+ * Responses for the cache and the caller. No clone(), no WebKit stream stall.
+ * Returns the Response to hand back to the page.
+ */
+async function cacheAndRespond(request, response) {
+  const buf = await response.arrayBuffer();
+  const init = {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  };
+  try {
+    const cache = await caches.open(CACHE_VERSION);
+    await cache.put(request, new Response(buf.slice(0), init));
+  } catch (err) {
+    // Cache write failure (quota, etc.) must never break the request itself.
+  }
+  return new Response(buf, init);
+}
+
+async function networkFirst(request) {
+  try {
+    const fresh = await fetch(request);
+    if (!fresh.ok) return fresh;
+    return await cacheAndRespond(request, fresh);
+  } catch (err) {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+    throw err;
+  }
+}
+
+async function cacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+  const fresh = await fetch(request);
+  if (!fresh.ok) return fresh;
+  try {
+    return await cacheAndRespond(request, fresh);
+  } catch (err) {
+    // Body buffering failed for some reason — fall back to a plain refetch so
+    // the caller still gets a working (uncached) response.
+    return fetch(request);
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
-  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) {
-    return; // ignore cross-origin / non-GET
-  }
-
-  const isDocument = request.mode === 'navigate' || request.destination === 'document';
-
-  if (isDocument) {
-    // Network-first: always try the network so new deploys load; cache as backup.
-    event.respondWith(
-      (async () => {
-        try {
-          const fresh = await fetch(request);
-          const cache = await caches.open(CACHE_VERSION);
-          cache.put(request, fresh.clone());
-          return fresh;
-        } catch {
-          const cached = await caches.match(request);
-          return cached ?? Response.error();
-        }
-      })(),
-    );
+  if (request.method !== 'GET') return;
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch {
     return;
   }
+  if (url.origin !== self.location.origin) return; // never touch cross-origin
 
-  // Cache-first for hashed/static assets.
-  event.respondWith(
-    (async () => {
-      const cached = await caches.match(request);
-      if (cached) return cached;
-      const fresh = await fetch(request);
-      if (fresh.ok) {
-        const cache = await caches.open(CACHE_VERSION);
-        cache.put(request, fresh.clone());
-      }
-      return fresh;
-    })(),
-  );
+  const isDocument = request.mode === 'navigate' || request.destination === 'document';
+  event.respondWith(isDocument ? networkFirst(request) : cacheFirst(request));
 });
