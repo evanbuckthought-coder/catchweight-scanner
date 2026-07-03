@@ -6,7 +6,8 @@ import {
   startCamera,
   stopCamera,
 } from '../lib/scanner';
-import { onOcrProgress, preloadOcr, recognizeVideoRegion, type OcrRead } from '../lib/ocr';
+import { recognizeVideoRegion, type OcrRead } from '../lib/ocr';
+import { useOcrEngine } from '../hooks/useOcrEngine';
 
 export type ScanMode = 'barcode' | 'ocr';
 
@@ -26,7 +27,6 @@ interface ScannerViewProps {
 }
 
 type Status = 'idle' | 'loading' | 'ready' | 'error';
-type OcrStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 /**
  * Live rear-camera view with two capture loops: the ZBar barcode loop, or the
@@ -40,7 +40,9 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string>('');
   const [retryNonce, setRetryNonce] = useState(0);
-  const [ocrStatus, setOcrStatus] = useState<OcrStatus>('idle');
+  // Engine lifecycle lives in a dedicated (regression-tested) hook — see
+  // useOcrEngine for why this must not be an inline effect.
+  const ocr = useOcrEngine(mode === 'ocr' && active);
 
   // Camera + zbar wasm lifecycle. Re-runs on `retryNonce` bump (Retry button).
   useEffect(() => {
@@ -93,37 +95,6 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [active]);
 
-  const [ocrLoadMsg, setOcrLoadMsg] = useState('');
-
-  // Lazy-load the OCR engine the first time OCR mode is enabled.
-  useEffect(() => {
-    if (mode !== 'ocr' || !active || ocrStatus === 'ready' || ocrStatus === 'loading') return;
-    let cancelled = false;
-    setOcrStatus('loading');
-    setOcrLoadMsg('');
-    onOcrProgress((msg) => {
-      if (!cancelled) setOcrLoadMsg(msg);
-    });
-    preloadOcr()
-      .then(() => {
-        if (!cancelled) setOcrStatus('ready');
-      })
-      .catch((err) => {
-        console.warn('OCR engine failed to load:', err);
-        if (!cancelled) {
-          setOcrLoadMsg(err instanceof Error ? err.message : String(err));
-          setOcrStatus('error');
-        }
-      })
-      .finally(() => {
-        onOcrProgress(null);
-      });
-    return () => {
-      cancelled = true;
-      onOcrProgress(null);
-    };
-  }, [mode, active, ocrStatus]);
-
   // Barcode scan loop.
   useEffect(() => {
     if (mode !== 'barcode' || status !== 'ready' || paused || !active) return;
@@ -141,7 +112,7 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
   // (Tesseract takes a few hundred ms per frame; a busy-wait guard is implicit
   // in the sequential await).
   useEffect(() => {
-    if (mode !== 'ocr' || status !== 'ready' || ocrStatus !== 'ready' || paused || !active) return;
+    if (mode !== 'ocr' || status !== 'ready' || ocr.status !== 'ready' || paused || !active) return;
     const video = videoRef.current;
     if (!video) return;
     let stopped = false;
@@ -160,7 +131,7 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
           // after repeated failures surface the error state with its Retry.
           consecutiveErrors += 1;
           if (consecutiveErrors >= 5) {
-            if (!stopped) setOcrStatus('error');
+            if (!stopped) ocr.fail('recognition kept failing — retry');
             break;
           }
         }
@@ -170,10 +141,13 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     return () => {
       stopped = true;
     };
-  }, [mode, status, ocrStatus, paused, active, onOcrRead]);
+  }, [mode, status, ocr.status, ocr.fail, paused, active, onOcrRead]);
 
   return (
-    <div className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black ring-1 ring-slate-700">
+    <div
+      data-ocr-engine={mode === 'ocr' ? ocr.status : undefined}
+      className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black ring-1 ring-slate-700"
+    >
       <video ref={videoRef} playsInline muted className="h-full w-full object-cover" />
 
       {/* Barcode reticle */}
@@ -203,23 +177,23 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
               {ocrFeedback}
             </span>
           )}
-          {ocrStatus === 'loading' && (
+          {ocr.status === 'loading' && (
             <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
-              Loading OCR engine…{ocrLoadMsg ? ` (${ocrLoadMsg})` : ''}
+              Loading OCR engine…{ocr.message ? ` (${ocr.message})` : ''}
             </span>
           )}
         </div>
       )}
 
       {/* OCR engine failed (camera itself is fine) */}
-      {status === 'ready' && mode === 'ocr' && ocrStatus === 'error' && (
+      {status === 'ready' && mode === 'ocr' && ocr.status === 'error' && (
         <div className="absolute inset-x-0 bottom-3 flex justify-center">
           <button
             type="button"
-            onClick={() => setOcrStatus('idle')}
+            onClick={ocr.retry}
             className="pointer-events-auto max-w-[92%] rounded-full bg-rose-500/90 px-4 py-1.5 text-xs font-semibold text-white"
           >
-            OCR engine failed{ocrLoadMsg ? ` (${ocrLoadMsg})` : ''} — tap to retry
+            OCR engine failed{ocr.message ? ` (${ocr.message})` : ''} — tap to retry
           </button>
         </div>
       )}
