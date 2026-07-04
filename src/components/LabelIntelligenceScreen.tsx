@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import type { GtinProfile } from '../types';
 import { loadOcrProfiles, removeOcrProfile, type OcrLabelProfile } from '../lib/ocrProfiles';
+import { TeachLabelFlow } from './TeachLabelFlow';
 
 interface LabelIntelligenceScreenProps {
   /** Saved GTIN profiles (App owns this state so capture prefills stay fresh). */
   profiles: Record<string, GtinProfile>;
   onDeleteProfile: (gtin: string) => void;
+  /** Create/update a GTIN profile (used by Teach a new label). */
+  onUpsertProfile: (profile: GtinProfile) => void;
   onBack: () => void;
 }
 
@@ -14,15 +17,16 @@ type SubView = 'menu' | 'teach' | 'gtin' | 'ocr';
 /**
  * Label Intelligence: the home for everything that teaches the app about
  * labels — a between-receivals activity, never part of the capture path.
- * "Teach a new label" is a reserved stub; the AI label-understanding tool
- * plugs into that slot next.
+ * "Teach a new label" photographs a carton label once and has the vision AI
+ * learn its layout (see TeachLabelFlow); profiles are managed below it.
  */
-export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onBack }: LabelIntelligenceScreenProps) {
+export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onUpsertProfile, onBack }: LabelIntelligenceScreenProps) {
   const [sub, setSub] = useState<SubView>('menu');
   const [openGtin, setOpenGtin] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [ocrProfiles, setOcrProfiles] = useState<OcrLabelProfile[]>(() => loadOcrProfiles());
   const [confirmOcrDelete, setConfirmOcrDelete] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState<string | null>(null);
 
   const gtinList = Object.values(profiles).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 
@@ -40,24 +44,21 @@ export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onBack }: L
     </header>
   );
 
-  // ---- Teach a new label (STUB — reserved slot for the AI tool) ------------
+  // ---- Teach a new label (AI vision — one call per label design) -----------
   if (sub === 'teach') {
     return (
       <div className="mx-auto flex min-h-screen max-w-md flex-col gap-4 p-4">
         {header('Teach a new label', () => setSub('menu'))}
-        <div className="mt-8 rounded-2xl bg-slate-800/60 p-6 text-center ring-1 ring-slate-700">
-          <div className="text-5xl">🤖</div>
-          <h2 className="mt-3 text-xl font-bold text-slate-100">Coming soon</h2>
-          <p className="mt-2 text-sm text-slate-400">
-            Point the camera at any supplier’s carton label and the app will learn where the
-            weight, batch and dates live — making barcode and OCR capture smarter for that
-            supplier.
-          </p>
-          <p className="mt-3 text-xs text-slate-500">
-            This slot is reserved: the AI label-understanding tool is the next build step and
-            drops straight in here.
-          </p>
-        </div>
+        <TeachLabelFlow
+          gtinProfiles={profiles}
+          onUpsertGtinProfile={onUpsertProfile}
+          onSaved={(name) => {
+            setOcrProfiles(loadOcrProfiles());
+            setSavedNote(name);
+            setSub('menu');
+          }}
+          onCancel={() => setSub('menu')}
+        />
       </div>
     );
   }
@@ -77,6 +78,9 @@ export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onBack }: L
               ['GTIN', open.gtin],
               ['Format fingerprint', open.fingerprint || '—'],
               ['Last confirmed', new Date(open.updatedAt).toLocaleString()],
+              ...(open.source === 'ai-teach'
+                ? [['Source', `Teach a new label (AI) · ${new Date(open.taughtAt ?? open.updatedAt).toLocaleDateString()}`]]
+                : []),
             ].map(([label, value]) => (
               <div key={label} className="flex justify-between gap-3 border-b border-slate-700/60 py-2 text-sm last:border-b-0">
                 <span className="shrink-0 text-slate-400">{label}</span>
@@ -176,7 +180,7 @@ export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onBack }: L
         </p>
         {ocrProfiles.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
-            No OCR label profiles yet. “Teach a new label” (coming soon) will create these.
+            No OCR label profiles yet — use “Teach a new label” to create one from a photo.
           </div>
         ) : (
           <ul className="flex flex-col gap-2">
@@ -188,6 +192,21 @@ export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onBack }: L
                     <div className="truncate text-xs text-slate-400">
                       {p.description || '—'} · {new Date(p.updatedAt).toLocaleString()}
                     </div>
+                    {p.data && (
+                      <div className="mt-1 text-xs text-slate-500">
+                        {[
+                          p.data.unit ? `unit ${p.data.unit}` : null,
+                          p.data.decimalPlaces !== null ? `${p.data.decimalPlaces} dp` : null,
+                          p.data.weightRegion ? `weight: ${p.data.weightRegion}` : null,
+                          p.data.anchorText ? `anchor “${p.data.anchorText}”` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || 'layout taught'}
+                        <span className="block text-slate-600">
+                          AI-taught {new Date(p.data.taughtAt).toLocaleDateString()} · delete to relearn
+                        </span>
+                      </div>
+                    )}
                   </div>
                   {confirmOcrDelete === p.id ? (
                     <div className="flex shrink-0 gap-1">
@@ -236,20 +255,32 @@ export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onBack }: L
         capture flow.
       </p>
 
+      {savedNote && (
+        <p
+          data-testid="teach-saved-note"
+          className="rounded-xl bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300 ring-1 ring-emerald-500/40"
+        >
+          ✓ Label profile saved for “{savedNote}”.
+        </p>
+      )}
+
       <button
         type="button"
         data-testid="labels-teach"
-        onClick={() => setSub('teach')}
+        onClick={() => {
+          setSavedNote(null);
+          setSub('teach');
+        }}
         className="rounded-xl bg-slate-800 px-4 py-4 text-left ring-1 ring-slate-600 active:bg-slate-700"
       >
         <span className="flex items-center justify-between text-base font-semibold text-slate-200">
           🤖 Teach a new label
           <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-300 ring-1 ring-indigo-500/40">
-            Coming soon
+            AI
           </span>
         </span>
         <span className="block text-xs font-normal text-slate-500">
-          AI-learn a supplier’s label layout from the camera
+          Photograph a carton label once — the AI learns its layout
         </span>
       </button>
 

@@ -4,6 +4,7 @@ import { parseGS1, type ParsedCarton } from './lib/gs1';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, removeProfile, upsertProfile } from './lib/profiles';
+import { findTaughtProfile } from './lib/ocrProfiles';
 import {
   allCartons,
   findDuplicate,
@@ -372,13 +373,20 @@ export default function App() {
 
       // Check 2: the unit must have been READ, not guessed — a lb label read
       // without its unit would otherwise enter as kg, off by 2.2x. When
-      // guessed, default to the product's known unit and force a confirm.
+      // guessed, default to the product's known unit, else the supplier's
+      // taught label profile — and always force a confirm (a taught profile
+      // biases the assumption; it never bypasses the check).
       let unit = w.unit;
       const warnings: string[] = [];
       if (!w.unitExplicit) {
         const productUnit = active ? productCartons(active).at(-1)?.unit : undefined;
-        unit = productUnit ?? w.unit;
-        warnings.push(`Unit not read from the label — assumed ${unit}. Confirm against the carton.`);
+        const taughtUnit = findTaughtProfile(session.supplier)?.data?.unit ?? undefined;
+        unit = productUnit ?? taughtUnit ?? w.unit;
+        warnings.push(
+          `Unit not read from the label — assumed ${unit}${
+            !productUnit && taughtUnit ? ' (from this supplier’s taught label)' : ''
+          }. Confirm against the carton.`,
+        );
       }
 
       const kg = toKg(w.value, unit);
@@ -665,6 +673,11 @@ export default function App() {
     setProfiles(removeProfile(gtin));
   }, []);
 
+  /** Create/update a GTIN profile from "Teach a new label". */
+  const upsertGtinProfile = useCallback((profile: GtinProfile) => {
+    setProfiles(upsertProfile(profile));
+  }, []);
+
   const handleExport = useCallback(async () => {
     const cur = sessionRef.current;
     if (!cur || allCartons(cur).length === 0) {
@@ -741,6 +754,7 @@ export default function App() {
       <LabelIntelligenceScreen
         profiles={profiles}
         onDeleteProfile={deleteGtinProfile}
+        onUpsertProfile={upsertGtinProfile}
         onBack={() => setNav('home')}
       />
     );

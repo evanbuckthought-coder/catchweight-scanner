@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/teach-label.ts": {
+      "maxDuration": 60
+    }
+  }
+}

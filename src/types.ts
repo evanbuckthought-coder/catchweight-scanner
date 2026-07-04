@@ -97,6 +97,10 @@ export interface GtinProfile {
   supplierName: string;
   fingerprint: string;
   updatedAt: string;
+  /** Provenance: set when this profile was created/updated by "Teach a new label". */
+  source?: 'ai-teach';
+  /** When the AI teach that produced this profile happened (ISO). */
+  taughtAt?: string;
 }
 
 /** A capture-and-tally session against one PO. */
