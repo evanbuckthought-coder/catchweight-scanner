@@ -3,7 +3,7 @@ import type { CartonRecord, GtinProfile, Session } from './types';
 import { parseGS1, type ParsedCarton } from './lib/gs1';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
-import { loadProfiles, upsertProfile } from './lib/profiles';
+import { loadProfiles, removeProfile, upsertProfile } from './lib/profiles';
 import {
   allCartons,
   findDuplicate,
@@ -22,12 +22,15 @@ import { signalSuccess, signalError } from './lib/feedback';
 import { useLocalStorage } from './hooks/useLocalStorage';
 
 import { SetupScreen } from './components/SetupScreen';
+import { HomeScreen } from './components/HomeScreen';
 import { SessionSetup } from './components/SessionSetup';
 import { ScannerView, type ScanMode } from './components/ScannerView';
 import { Readout } from './components/Readout';
 import { CartonList } from './components/CartonList';
 import { DevPanel } from './components/DevPanel';
 import { SettingsMenu } from './components/SettingsMenu';
+import { SettingsScreen } from './components/SettingsScreen';
+import { LabelIntelligenceScreen } from './components/LabelIntelligenceScreen';
 import { SummaryScreen } from './components/SummaryScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ResumePrompt } from './components/ResumePrompt';
@@ -100,7 +103,7 @@ export default function App() {
 
   // --- session persistence (IndexedDB) -------------------------------------
   const [session, setSessionState] = useState<Session | null>(null);
-  const [boot, setBoot] = useState<'loading' | 'resume' | 'ready'>('loading');
+  const [boot, setBoot] = useState<'loading' | 'ready'>('loading');
   const [persistError, setPersistError] = useState(false);
   /** Latest session for synchronous checks inside commit paths. */
   const sessionRef = useRef<Session | null>(null);
@@ -111,12 +114,10 @@ export default function App() {
     loadActiveSession()
       .then((s) => {
         if (!alive) return;
-        if (s) {
-          setSessionState(s);
-          setBoot('resume'); // never silently resume OR silently discard
-        } else {
-          setBoot('ready');
-        }
+        // An unfinished session isn't auto-resumed: it surfaces as the
+        // "Resume last session" item on the home screen.
+        if (s) setSessionState(s);
+        setBoot('ready');
       })
       .catch((err) => {
         console.warn('Failed to load session from device storage:', err);
@@ -143,7 +144,12 @@ export default function App() {
   }, [session, boot]);
 
   // --- UI state -------------------------------------------------------------
-  const [screen, setScreen] = useState<'main' | 'history'>('main');
+  /** Top-level navigation. Home is the entry point; 'capture' is the sacred
+   *  receiving flow; 'resume-guard' protects an unfinished session when the
+   *  user taps New receival while one exists. */
+  const [nav, setNav] = useState<
+    'home' | 'resume-guard' | 'session-setup' | 'capture' | 'history' | 'labels' | 'settings'
+  >('home');
   const [view, setView] = useState<'scan' | 'summary'>('scan');
   const [mode, setMode] = useState<ScanMode>('barcode');
   const [pending, setPending] = useState<PendingConfirm | null>(null);
@@ -619,6 +625,7 @@ export default function App() {
       });
       setView('scan');
       setMode('barcode');
+      setNav('capture');
     },
     [scannedBy],
   );
@@ -634,6 +641,7 @@ export default function App() {
       setSettingsOpen(false);
       setView('scan');
       setMode('barcode');
+      setNav('home');
       lastDecodeRef.current = { raw: '', time: 0 };
       showToast(`Saved ${cur.poRef} to history`, 'info');
     } catch (err) {
@@ -647,7 +655,14 @@ export default function App() {
     setSettingsOpen(false);
     setView('scan');
     setMode('barcode');
+    setNav('home');
     lastDecodeRef.current = { raw: '', time: 0 };
+  }, []);
+
+  /** Delete a GTIN profile (Label Intelligence "delete / relearn"). App owns
+   *  the profiles state so capture prefills can never go stale. */
+  const deleteGtinProfile = useCallback((gtin: string) => {
+    setProfiles(removeProfile(gtin));
   }, []);
 
   const handleExport = useCallback(async () => {
@@ -705,22 +720,6 @@ export default function App() {
     );
   }
 
-  if (boot === 'resume' && session) {
-    return (
-      <>
-        {persistBanner}
-        <ResumePrompt
-          session={session}
-          onResume={() => setBoot('ready')}
-          onDiscard={() => {
-            setSessionState(null);
-            setBoot('ready');
-          }}
-        />
-      </>
-    );
-  }
-
   if (!scannedBy || editingName) {
     return (
       <SetupScreen
@@ -733,11 +732,57 @@ export default function App() {
     );
   }
 
-  if (screen === 'history') {
-    return <HistoryScreen onBack={() => setScreen('main')} />;
+  if (nav === 'history') {
+    return <HistoryScreen onBack={() => setNav('home')} />;
   }
 
-  if (!session) {
+  if (nav === 'labels') {
+    return (
+      <LabelIntelligenceScreen
+        profiles={profiles}
+        onDeleteProfile={deleteGtinProfile}
+        onBack={() => setNav('home')}
+      />
+    );
+  }
+
+  if (nav === 'settings') {
+    return (
+      <SettingsScreen
+        scannedBy={scannedBy}
+        onChangeName={(name) => {
+          setScannedBy(name);
+          setSessionState((prev) => (prev ? { ...prev, scannedBy: name } : prev));
+        }}
+        devTools={devTools}
+        onToggleDevTools={setDevTools}
+        onBack={() => setNav('home')}
+      />
+    );
+  }
+
+  // New receival tapped while an unfinished session exists: never silently
+  // clobber it — the operator explicitly resumes or discards first.
+  if (nav === 'resume-guard' && session) {
+    return (
+      <>
+        {persistBanner}
+        <ResumePrompt
+          session={session}
+          onResume={() => {
+            setView('scan');
+            setNav('capture');
+          }}
+          onDiscard={() => {
+            discardSession();
+            setNav('session-setup');
+          }}
+        />
+      </>
+    );
+  }
+
+  if (nav === 'session-setup') {
     return (
       <>
         {persistBanner}
@@ -745,7 +790,27 @@ export default function App() {
           scannedBy={scannedBy}
           onStart={startSession}
           onEditName={() => setEditingName(true)}
-          onHistory={() => setScreen('history')}
+          onBack={() => setNav('home')}
+        />
+      </>
+    );
+  }
+
+  // Home is the entry point and the fallback whenever capture has no session.
+  if (nav !== 'capture' || !session) {
+    return (
+      <>
+        {persistBanner}
+        <HomeScreen
+          activeSession={session}
+          onNewReceival={() => setNav(session ? 'resume-guard' : 'session-setup')}
+          onResume={() => {
+            setView('scan');
+            setNav('capture');
+          }}
+          onHistory={() => setNav('history')}
+          onLabels={() => setNav('labels')}
+          onSettings={() => setNav('settings')}
         />
       </>
     );
@@ -785,8 +850,19 @@ export default function App() {
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-3">
       {persistBanner}
-      <header className="flex items-center justify-between">
-        <div className="min-w-0">
+      <header className="flex items-center justify-between gap-2">
+        {/* Navigation chrome only: leaves capture WITHOUT ending the session
+            (it persists and reappears as "Resume last session" on home). */}
+        <button
+          type="button"
+          data-testid="capture-home"
+          onClick={() => setNav('home')}
+          aria-label="Home"
+          className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-slate-300 ring-1 ring-slate-600"
+        >
+          ‹
+        </button>
+        <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-semibold text-slate-100">{session.poRef}</div>
           <div className="truncate text-xs text-slate-400">
             {session.supplier}
@@ -797,7 +873,7 @@ export default function App() {
           type="button"
           onClick={() => setSettingsOpen(true)}
           aria-label="Settings"
-          className="rounded-lg bg-slate-800 px-3 py-2 text-slate-300 ring-1 ring-slate-600"
+          className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-slate-300 ring-1 ring-slate-600"
         >
           ⚙
         </button>
@@ -966,8 +1042,6 @@ export default function App() {
         <SettingsMenu
           scannedBy={scannedBy}
           poRef={session.poRef}
-          devTools={devTools}
-          onToggleDevTools={setDevTools}
           onChangeName={(name) => {
             setScannedBy(name);
             // Keep the session-level name in sync (it feeds the export summary).

@@ -4,11 +4,11 @@ interface SessionSetupProps {
   scannedBy: string;
   onStart: (poRef: string, supplier: string, brand: string | undefined) => void;
   onEditName: () => void;
-  onHistory: () => void;
+  onBack: () => void;
 }
 
 /** Start a PO session: PO reference + supplier (compulsory) + brand (optional). */
-export function SessionSetup({ scannedBy, onStart, onEditName, onHistory }: SessionSetupProps) {
+export function SessionSetup({ scannedBy, onStart, onEditName, onBack }: SessionSetupProps) {
   const [poRef, setPoRef] = useState('');
   const [supplier, setSupplier] = useState('');
   const [brand, setBrand] = useState('');
@@ -17,8 +17,15 @@ export function SessionSetup({ scannedBy, onStart, onEditName, onHistory }: Sess
 
   return (
     <div className="flex min-h-screen flex-col gap-5 p-5">
-      <header className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">New session</h1>
+      <header className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-slate-300 ring-1 ring-slate-600"
+        >
+          ‹ Home
+        </button>
+        <h1 className="text-xl font-bold">New receival</h1>
         <button
           type="button"
           onClick={onEditName}
@@ -64,26 +71,15 @@ export function SessionSetup({ scannedBy, onStart, onEditName, onHistory }: Sess
         product under the same PO; review and export at the end.
       </p>
 
-      <div className="mt-auto flex flex-col gap-3">
-        <button
-          type="button"
-          data-testid="history"
-          onClick={onHistory}
-          className="rounded-xl bg-slate-800 py-3 text-base font-semibold text-slate-200 ring-1 ring-slate-600 active:bg-slate-700"
-        >
-          🗂 Past receivals
-        </button>
-        <button
-          type="button"
-          data-testid="start-session"
-          disabled={!canStart}
-          onClick={() => onStart(poRef.trim(), supplier.trim(), brand.trim() || undefined)}
-          className="rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
-        >
-          Start session
-        </button>
-        <p className="text-center text-[11px] text-slate-600">Build {__BUILD_ID__}</p>
-      </div>
+      <button
+        type="button"
+        data-testid="start-session"
+        disabled={!canStart}
+        onClick={() => onStart(poRef.trim(), supplier.trim(), brand.trim() || undefined)}
+        className="mt-auto rounded-xl bg-emerald-500 py-3 text-base font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
+      >
+        Start session
+      </button>
     </div>
   );
 }

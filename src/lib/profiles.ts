@@ -22,3 +22,14 @@ export function upsertProfile(profile: GtinProfile): Record<string, GtinProfile>
   saveJSON(STORAGE_KEYS.profiles, all);
   return all;
 }
+
+/**
+ * Delete a profile ("relearn": the next scan of this GTIN raises the
+ * first-carton confirm from scratch). Returns the full updated map.
+ */
+export function removeProfile(gtin: string): Record<string, GtinProfile> {
+  const all = loadProfiles();
+  delete all[gtin];
+  saveJSON(STORAGE_KEYS.profiles, all);
+  return all;
+}

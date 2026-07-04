@@ -9,6 +9,8 @@
 export const STORAGE_KEYS = {
   scannedBy: 'cw.scannedBy',
   profiles: 'cw.gtinProfiles',
+  /** OCR label-layout profiles (created by the future "Teach a new label" tool). */
+  ocrProfiles: 'cw.ocrLabelProfiles',
   /** Test tools (simulated scans) visibility — OFF by default in production. */
   devTools: 'cw.devTools',
   // NB: sessions now live in IndexedDB (see lib/persistence.ts). The legacy
