@@ -35,9 +35,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // trim(): env values pasted on a phone often carry a stray newline/space,
-  // which makes the x-api-key header invalid and the fetch throw instantly.
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  // Strip ALL whitespace from the key: phone copy-paste inserts newlines mid-
+  // value, which makes the x-api-key header invalid and the fetch throw. API
+  // keys never legitimately contain whitespace, so collapsing is lossless.
+  const apiKey = process.env.ANTHROPIC_API_KEY?.replace(/\s+/g, '');
   const secret = process.env.TEACH_SHARED_SECRET?.trim();
   if (!apiKey || !secret) {
     res.status(500).json({
@@ -122,11 +123,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(200).json({ ok: true, result: extractTeachJson(text) });
   } catch (err) {
     console.error('teach-label failed', err);
-    // detail: safe diagnostic (error class + message, any key-like string
-    // scrubbed). The app shows only `error`; detail is for curl debugging.
+    // detail: safe diagnostic (error class + message). Redact any long
+    // token-like run so header/body values (e.g. key fragments) can never
+    // be echoed. The app shows only `error`; detail is for curl debugging.
     const detail =
       err instanceof Error
-        ? `${err.name}: ${err.message} ${err.cause ?? ''}`.replace(/sk-ant-[\w-]+/g, '[key]').slice(0, 300)
+        ? `${err.name}: ${err.message}`.replace(/[A-Za-z0-9_-]{16,}/g, '[redacted]').slice(0, 300)
         : 'unknown';
     res.status(502).json({ error: 'Label analysis failed — check connectivity and try again', detail });
   }
