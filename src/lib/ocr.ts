@@ -18,13 +18,53 @@ import { toKg, type WeightUnit } from './units';
 /** Reads below this Tesseract confidence (0-100) are treated as failed. */
 export const OCR_MIN_CONFIDENCE = 70;
 
+/** OCR crop region as fractions of the camera frame. */
+export interface OcrRegion {
+  widthFrac: number;
+  heightFrac: number;
+  /** Region centre as a fraction of frame width/height (0.5 = centred). */
+  centerXFrac: number;
+  centerYFrac: number;
+}
+
 /**
- * Capture region as fractions of the camera frame, centred. Slightly larger
- * than the on-screen guide box: the <video> is displayed object-cover, so the
- * visible box and the true frame region don't align exactly — a generous crop
- * keeps the weight inside the OCR'd area.
+ * Default capture region, centred. Slightly larger than the on-screen guide
+ * box: the <video> is displayed object-cover, so the visible box and the true
+ * frame region don't align exactly — a generous crop keeps the weight inside
+ * the OCR'd area.
  */
-export const OCR_REGION = { widthFrac: 0.72, heightFrac: 0.2 };
+export const OCR_REGION: OcrRegion = { widthFrac: 0.72, heightFrac: 0.2, centerXFrac: 0.5, centerYFrac: 0.5 };
+
+/**
+ * Derive a capture region from a taught profile's free-text weight region
+ * (e.g. "bottom-right, inside the boxed grid"): the box shifts toward the
+ * zone where this label prints its weight, so the operator naturally frames
+ * the right part of the label. Unknown/absent text -> the centred default.
+ * When both of a pair appear ("center-left, right of ..."), the first wins.
+ */
+export function regionFromProfile(weightRegion: string | null | undefined): OcrRegion {
+  const text = (weightRegion ?? '').toLowerCase();
+  const first = (a: RegExp, b: RegExp): -1 | 0 | 1 => {
+    const ia = text.search(a);
+    const ib = text.search(b);
+    if (ia === -1 && ib === -1) return 0;
+    if (ib === -1) return -1;
+    if (ia === -1) return 1;
+    return ia <= ib ? -1 : 1;
+  };
+  const vert = first(/\b(top|upper)\b/, /\b(bottom|lower)\b/);
+  const horiz = first(/\bleft\b/, /\bright\b/);
+  const { widthFrac, heightFrac } = OCR_REGION;
+  const cx = horiz === 0 ? 0.5 : horiz < 0 ? 0.38 : 0.62;
+  const cy = vert === 0 ? 0.5 : vert < 0 ? 0.28 : 0.72;
+  return {
+    widthFrac,
+    heightFrac,
+    // Clamp so the crop never leaves the frame.
+    centerXFrac: Math.min(1 - widthFrac / 2, Math.max(widthFrac / 2, cx)),
+    centerYFrac: Math.min(1 - heightFrac / 2, Math.max(heightFrac / 2, cy)),
+  };
+}
 
 let workerPromise: Promise<TesseractWorker> | null = null;
 
@@ -239,15 +279,16 @@ export async function runOcrDiagnostics(onStep: (s: OcrDiagStep) => void): Promi
 export async function recognizeVideoRegion(
   video: HTMLVideoElement,
   canvas: HTMLCanvasElement,
+  region: OcrRegion = OCR_REGION,
 ): Promise<OcrRead | null> {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   if (!vw || !vh) return null;
 
-  const rw = vw * OCR_REGION.widthFrac;
-  const rh = vh * OCR_REGION.heightFrac;
-  const rx = (vw - rw) / 2;
-  const ry = (vh - rh) / 2;
+  const rw = vw * region.widthFrac;
+  const rh = vh * region.heightFrac;
+  const rx = vw * region.centerXFrac - rw / 2;
+  const ry = vh * region.centerYFrac - rh / 2;
   const scale = rw < 600 ? 600 / rw : 1;
   canvas.width = Math.round(rw * scale);
   canvas.height = Math.round(rh * scale);
@@ -265,6 +306,8 @@ export interface OcrWeight {
   unit: WeightUnit;
   /** True when the read value carried a decimal point (expected catchweight shape). */
   hasDecimal: boolean;
+  /** Digits read after the decimal point ("18.6" -> 1, "18." -> 0); undefined when no ".". */
+  decimals?: number;
   /**
    * True when a unit token (kg/lb/#) was actually read from the label. When
    * false the unit is a GUESS — the caller must not auto-accept (a lb label
@@ -313,7 +356,80 @@ export function parseWeightText(text: string): OcrWeight | null {
 
   const value = Number.parseFloat(numStr);
   if (!Number.isFinite(value) || value <= 0) return null;
-  return { value, unit, hasDecimal: numStr.includes('.'), unitExplicit };
+  const hasDecimal = numStr.includes('.');
+  return {
+    value,
+    unit,
+    hasDecimal,
+    decimals: hasDecimal ? numStr.split('.')[1].length : undefined,
+    unitExplicit,
+  };
+}
+
+/** The taught format a read must match (subset of a TaughtLabelMap). */
+export interface TaughtExpectations {
+  unit?: WeightUnit | null;
+  decimalPlaces?: number | null;
+  anchorText?: string | null;
+}
+
+export interface TaughtParse {
+  w: OcrWeight | null;
+  /** Set when a weight WAS read but doesn't match the taught format — the
+   *  caller shows this and keeps scanning instead of committing/warning. */
+  rejected?: string;
+}
+
+/**
+ * Profile-constrained weight parsing for taught labels:
+ *  - anchor-guided: when the taught anchor text (e.g. "NET WEIGHT") appears
+ *    in the read, prefer the number printed AFTER it — that's the net weight,
+ *    not a gross/tare/code that happens to share the line;
+ *  - format gate: reject reads whose explicit unit or decimal count
+ *    contradicts the taught format (a 3-dp label read as "1864" or "18.6" is
+ *    a misread, not a weight).
+ * This CONSTRAINS which candidate reaches the existing guardrails — it never
+ * relaxes them, and never supplies a weight value itself.
+ */
+export function parseWeightTaught(text: string, expect?: TaughtExpectations | null): TaughtParse {
+  let w: OcrWeight | null = null;
+
+  const anchorTokens = (expect?.anchorText ?? '')
+    .toLowerCase()
+    .split(/[^a-z0-9#]+/)
+    .filter((t) => t.length >= 2);
+  if (anchorTokens.length) {
+    const lower = text.toLowerCase();
+    let after = -1;
+    for (const t of anchorTokens) {
+      const i = lower.lastIndexOf(t);
+      if (i !== -1 && i + t.length > after) after = i + t.length;
+    }
+    if (after >= 0) w = parseWeightText(text.slice(after));
+    // The anchor slice can cut the unit off ("Net kg 12.43" sliced after
+    // "kg") — if the whole line reads the same value WITH its unit, use that.
+    if (w && !w.unitExplicit) {
+      const whole = parseWeightText(text);
+      if (whole && whole.value === w.value && whole.unitExplicit) w = whole;
+    }
+  }
+  w ??= parseWeightText(text);
+  if (!w || !expect) return { w };
+
+  if (w.unitExplicit && expect.unit && w.unit !== expect.unit) {
+    return { w: null, rejected: `read ${w.unit} — this label is taught ${expect.unit}` };
+  }
+  if (expect.decimalPlaces != null) {
+    const readDp = w.hasDecimal ? (w.decimals ?? 0) : null;
+    if (readDp !== expect.decimalPlaces) {
+      const shown = w.hasDecimal ? w.value.toFixed(w.decimals ?? 0) : String(w.value);
+      return {
+        w: null,
+        rejected: `read ${shown} — taught format is ${expect.decimalPlaces} decimal${expect.decimalPlaces === 1 ? '' : 's'}`,
+      };
+    }
+  }
+  return { w };
 }
 
 /**

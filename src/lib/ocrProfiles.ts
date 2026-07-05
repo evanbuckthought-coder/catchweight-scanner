@@ -10,6 +10,7 @@
  */
 
 import { STORAGE_KEYS, loadJSON, saveJSON } from './storage';
+import { suggestSupplier } from './suppliers';
 import type { WeightUnit } from './units';
 
 /** The learned layout "map" saved from a confirmed teach. */
@@ -72,16 +73,63 @@ export function upsertOcrProfile(profile: OcrLabelProfile): OcrLabelProfile[] {
 }
 
 /**
- * Find the taught profile for a session's supplier (case-insensitive
- * substring match either way, so "Fribin" matches "Fribin Meats S.L.").
- * Used only to BIAS OCR defaults (e.g. assumed unit) — never to skip a check.
+ * Company-form / category words that must never count as a name match on
+ * their own ("Alliance GROUP" must not match "Danish Crown GROUP").
+ */
+const GENERIC_NAME_TOKENS = new Set([
+  'limited', 'ltd', 'gmbh', 'inc', 'co', 'company', 'the', 'and',
+  'meats', 'meat', 'foods', 'food', 'group', 'farms', 'farm', 'fleisch',
+  'new', 'zealand', 'australia', 'export', 'exports',
+]);
+
+/** Distinctive name tokens: ≥4 chars and not a generic company/category word. */
+function nameTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 4 && !GENERIC_NAME_TOKENS.has(t));
+}
+
+/**
+ * Find the taught profile matching a supplier/manufacturer name. Matches
+ * case-insensitive substring either way ("Fribin" ↔ "Fribin Meats S.L."),
+ * else on a shared distinctive token ("Alliance Group Ltd" ↔ "Alliance
+ * Group Limited"). Used only to CONFIGURE OCR — never to skip a check.
  */
 export function findTaughtProfile(supplierName: string): OcrLabelProfile | undefined {
   const key = supplierName.trim().toLowerCase();
   if (!key) return undefined;
-  return loadOcrProfiles().find((p) => {
-    if (!p.data) return false;
+  const taught = loadOcrProfiles().filter((p) => !!p.data);
+  const bySubstring = taught.find((p) => {
     const name = p.name.trim().toLowerCase();
     return name === key || name.includes(key) || key.includes(name);
   });
+  if (bySubstring) return bySubstring;
+  const keyTokens = nameTokens(key);
+  return taught.find((p) => nameTokens(p.name).some((t) => keyTokens.includes(t)));
+}
+
+/**
+ * Resolve the label profile OCR mode must use for the current capture
+ * context — AUTOMATICALLY, never by manual selection during receiving:
+ * manufacturer via the product's GTIN prefix where a barcode has been
+ * scanned, else the session's supplier. Undefined = label not taught yet,
+ * and OCR mode must not run (the teach gate handles it).
+ */
+export function findProfileForCapture(
+  gtin: string | undefined,
+  supplier: string,
+): OcrLabelProfile | undefined {
+  const manufacturer = suggestSupplier(gtin);
+  return (manufacturer ? findTaughtProfile(manufacturer) : undefined) ?? findTaughtProfile(supplier);
+}
+
+/** Short on-screen summary of a taught format, e.g. `kg · 2 dp · near “NET WEIGHT”`. */
+export function taughtFormatHint(map: TaughtLabelMap): string {
+  const parts = [
+    map.unit ?? undefined,
+    map.decimalPlaces != null ? `${map.decimalPlaces} dp` : undefined,
+    map.anchorText ? `near “${map.anchorText}”` : undefined,
+  ].filter(Boolean);
+  return parts.join(' · ') || 'taught layout';
 }

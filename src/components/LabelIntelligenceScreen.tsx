@@ -10,6 +10,14 @@ interface LabelIntelligenceScreenProps {
   /** Create/update a GTIN profile (used by Teach a new label). */
   onUpsertProfile: (profile: GtinProfile) => void;
   onBack: () => void;
+  /** Open straight into a sub-view (the OCR teach gate jumps to 'teach'). */
+  initialSub?: 'menu' | 'teach';
+  /**
+   * Set when launched from the in-session OCR gate: teach save/cancel returns
+   * straight to the capture screen instead of the Label Intelligence menu
+   * (savedName present = a profile was saved).
+   */
+  onCaptureReturn?: (savedName?: string) => void;
 }
 
 type SubView = 'menu' | 'teach' | 'gtin' | 'ocr';
@@ -20,8 +28,15 @@ type SubView = 'menu' | 'teach' | 'gtin' | 'ocr';
  * "Teach a new label" photographs a carton label once and has the vision AI
  * learn its layout (see TeachLabelFlow); profiles are managed below it.
  */
-export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onUpsertProfile, onBack }: LabelIntelligenceScreenProps) {
-  const [sub, setSub] = useState<SubView>('menu');
+export function LabelIntelligenceScreen({
+  profiles,
+  onDeleteProfile,
+  onUpsertProfile,
+  onBack,
+  initialSub,
+  onCaptureReturn,
+}: LabelIntelligenceScreenProps) {
+  const [sub, setSub] = useState<SubView>(initialSub ?? 'menu');
   const [openGtin, setOpenGtin] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [ocrProfiles, setOcrProfiles] = useState<OcrLabelProfile[]>(() => loadOcrProfiles());
@@ -53,11 +68,15 @@ export function LabelIntelligenceScreen({ profiles, onDeleteProfile, onUpsertPro
           gtinProfiles={profiles}
           onUpsertGtinProfile={onUpsertProfile}
           onSaved={(name) => {
+            if (onCaptureReturn) {
+              onCaptureReturn(name);
+              return;
+            }
             setOcrProfiles(loadOcrProfiles());
             setSavedNote(name);
             setSub('menu');
           }}
-          onCancel={() => setSub('menu')}
+          onCancel={() => (onCaptureReturn ? onCaptureReturn() : setSub('menu'))}
         />
       </div>
     );

@@ -3,15 +3,15 @@ import { parseWeightText, ocrToParsed } from './ocr';
 
 describe('parseWeightText', () => {
   it('reads a plain kg weight', () => {
-    expect(parseWeightText('18.64 kg')).toEqual({ value: 18.64, unit: 'kg', hasDecimal: true, unitExplicit: true });
+    expect(parseWeightText('18.64 kg')).toEqual({ value: 18.64, unit: 'kg', hasDecimal: true, decimals: 2, unitExplicit: true });
   });
 
   it('reads a lb weight', () => {
-    expect(parseWeightText('NET WT 41.1 lb')).toEqual({ value: 41.1, unit: 'lb', hasDecimal: true, unitExplicit: true });
+    expect(parseWeightText('NET WT 41.1 lb')).toEqual({ value: 41.1, unit: 'lb', hasDecimal: true, decimals: 1, unitExplicit: true });
   });
 
   it('guesses kg when no unit is visible — flagged NOT explicit (no auto-accept)', () => {
-    expect(parseWeightText('13.62')).toEqual({ value: 13.62, unit: 'kg', hasDecimal: true, unitExplicit: false });
+    expect(parseWeightText('13.62')).toEqual({ value: 13.62, unit: 'kg', hasDecimal: true, decimals: 2, unitExplicit: false });
   });
 
   it('a non-adjacent unit token still counts as explicit', () => {

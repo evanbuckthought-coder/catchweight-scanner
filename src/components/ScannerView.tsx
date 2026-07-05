@@ -6,7 +6,7 @@ import {
   startCamera,
   stopCamera,
 } from '../lib/scanner';
-import { recognizeVideoRegion, type OcrRead } from '../lib/ocr';
+import { OCR_REGION, recognizeVideoRegion, type OcrRead, type OcrRegion } from '../lib/ocr';
 import { useOcrEngine } from '../hooks/useOcrEngine';
 
 export type ScanMode = 'barcode' | 'ocr';
@@ -24,6 +24,12 @@ interface ScannerViewProps {
   onOcrRead: (read: OcrRead) => void;
   /** Latest OCR capture feedback (e.g. "✓ 41.1 lb → 18.64 kg"). */
   ocrFeedback?: string;
+  /** OCR crop region from the taught label profile (defaults to centred). */
+  ocrRegion?: OcrRegion;
+  /** Active taught profile name — shown so a label mismatch is visible at a glance. */
+  ocrProfileName?: string;
+  /** Expected-format hint from the profile (e.g. `kg · 2 dp · near “NET WEIGHT”`). */
+  ocrHint?: string;
 }
 
 type Status = 'idle' | 'loading' | 'ready' | 'error';
@@ -34,7 +40,17 @@ type Status = 'idle' | 'loading' | 'ready' | 'error';
  * Loops are torn down while `paused` (a confirm sheet is open) but the camera
  * stream stays warm so resuming is instant.
  */
-export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeedback }: ScannerViewProps) {
+export function ScannerView({
+  active,
+  paused,
+  mode,
+  onDecode,
+  onOcrRead,
+  ocrFeedback,
+  ocrRegion,
+  ocrProfileName,
+  ocrHint,
+}: ScannerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<Status>('idle');
@@ -121,7 +137,7 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     (async () => {
       while (!stopped) {
         try {
-          const read = await recognizeVideoRegion(video, canvas);
+          const read = await recognizeVideoRegion(video, canvas, ocrRegion ?? OCR_REGION);
           consecutiveErrors = 0;
           if (stopped) break;
           if (read && read.text) onOcrRead(read);
@@ -141,7 +157,7 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
     return () => {
       stopped = true;
     };
-  }, [mode, status, ocr.status, ocr.fail, paused, active, onOcrRead]);
+  }, [mode, status, ocr.status, ocr.fail, paused, active, onOcrRead, ocrRegion]);
 
   return (
     <div
@@ -161,29 +177,58 @@ export function ScannerView({ active, paused, mode, onDecode, onOcrRead, ocrFeed
         </div>
       )}
 
-      {/* OCR capture box (slightly smaller than the actual crop region — see OCR_REGION) */}
-      {status === 'ready' && mode === 'ocr' && (
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">
-          <span className="rounded-full bg-slate-900/70 px-3 py-1 text-xs font-medium text-sky-200">
-            Align the printed weight in the box
-          </span>
-          <div
-            className={`h-[15%] w-2/3 rounded-lg border-2 ${
-              paused ? 'border-amber-400/70' : 'border-sky-400/90'
-            }`}
-          />
-          {ocrFeedback && (
-            <span className="max-w-[90%] truncate rounded-full bg-slate-900/80 px-3 py-1 text-sm font-semibold text-emerald-300">
-              {ocrFeedback}
-            </span>
-          )}
-          {ocr.status === 'loading' && (
-            <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
-              Loading OCR engine…{ocr.message ? ` (${ocr.message})` : ''}
-            </span>
-          )}
-        </div>
-      )}
+      {/* OCR overlay: capture box positioned per the taught label's weight
+          region (visually ~92%/75% of the true crop — see OCR_REGION), with
+          the active profile + expected format pinned at the top so a label
+          mismatch is visible at a glance. */}
+      {status === 'ready' &&
+        mode === 'ocr' &&
+        (() => {
+          const region = ocrRegion ?? OCR_REGION;
+          const boxW = region.widthFrac * 0.92;
+          const boxH = region.heightFrac * 0.75;
+          return (
+            <div className="pointer-events-none absolute inset-0">
+              <div className="absolute inset-x-0 top-2 flex flex-col items-center gap-1 px-2">
+                {ocrProfileName && (
+                  <span
+                    data-testid="ocr-active-profile"
+                    className="max-w-full truncate rounded-full bg-indigo-500/80 px-3 py-1 text-xs font-semibold text-white"
+                  >
+                    🏷 {ocrProfileName}
+                  </span>
+                )}
+                <span className="max-w-full truncate rounded-full bg-slate-900/70 px-3 py-1 text-xs font-medium text-sky-200">
+                  {ocrHint ? `Expecting ${ocrHint}` : 'Align the printed weight in the box'}
+                </span>
+              </div>
+              <div
+                data-testid="ocr-box"
+                className={`absolute rounded-lg border-2 ${
+                  paused ? 'border-amber-400/70' : 'border-sky-400/90'
+                }`}
+                style={{
+                  left: `${(region.centerXFrac - boxW / 2) * 100}%`,
+                  top: `${(region.centerYFrac - boxH / 2) * 100}%`,
+                  width: `${boxW * 100}%`,
+                  height: `${boxH * 100}%`,
+                }}
+              />
+              <div className="absolute inset-x-0 bottom-8 flex flex-col items-center gap-1 px-2">
+                {ocrFeedback && (
+                  <span className="max-w-[90%] truncate rounded-full bg-slate-900/80 px-3 py-1 text-sm font-semibold text-emerald-300">
+                    {ocrFeedback}
+                  </span>
+                )}
+                {ocr.status === 'loading' && (
+                  <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs text-slate-300">
+                    Loading OCR engine…{ocr.message ? ` (${ocr.message})` : ''}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
       {/* OCR engine failed (camera itself is fine) */}
       {status === 'ready' && mode === 'ocr' && ocr.status === 'error' && (
