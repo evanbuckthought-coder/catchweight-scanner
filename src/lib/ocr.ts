@@ -28,6 +28,45 @@ export const OCR_REGION = { widthFrac: 0.72, heightFrac: 0.2 };
 
 let workerPromise: Promise<TesseractWorker> | null = null;
 
+let warmed = false;
+
+/**
+ * Best-effort OCR cache warm-up — call once per app open, while connectivity
+ * is likely. Downloads (through the service worker, which caches them) every
+ * file OCR mode needs offline, WITHOUT booting the engine:
+ *
+ *  - the lazy tesseract.js chunk. Critical: every deploy gives it a NEW
+ *    hashed URL, so after an app update the old cached copy no longer counts —
+ *    without this warm-up, the first OCR use after an update needs reception
+ *    ("Importing a module script failed" in a dead-zone coolstore).
+ *  - worker.min.js, the WASM core this device will pick (same feature
+ *    detection tesseract uses), and the language data. Stable URLs — these
+ *    stay cached across deploys, so re-warming them costs no data.
+ *
+ * Failures are swallowed: offline at open simply means no warm-up this time.
+ */
+export async function warmOcrCache(): Promise<void> {
+  if (warmed) return;
+  warmed = true;
+  try {
+    await import('tesseract.js');
+    const { simd, relaxedSimd } = await import('wasm-feature-detect');
+    const core = (await relaxedSimd())
+      ? 'tesseract-core-relaxedsimd-lstm.wasm.js'
+      : (await simd())
+        ? 'tesseract-core-simd-lstm.wasm.js'
+        : 'tesseract-core-lstm.wasm.js';
+    const abs = (path: string) => new URL(path, window.location.origin).href;
+    await Promise.allSettled([
+      fetch(abs('/tesseract/worker.min.js')),
+      fetch(abs(`/tesseract/core/${core}`)),
+      fetch(abs('/tesseract/lang/eng.traineddata.gz')),
+    ]);
+  } catch {
+    warmed = false; // let a later call retry (e.g. next app open online)
+  }
+}
+
 /** Optional listener for engine-load progress (shown in the loading UI). */
 let progressListener: ((message: string) => void) | null = null;
 export function onOcrProgress(listener: ((message: string) => void) | null): void {

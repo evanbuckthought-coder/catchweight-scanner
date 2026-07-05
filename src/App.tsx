@@ -16,7 +16,7 @@ import {
 } from './lib/session';
 import { loadActiveSession, saveActiveSession, saveReceival } from './lib/persistence';
 import { weightWarnings } from './lib/guardrails';
-import { OCR_MIN_CONFIDENCE, ocrToParsed, parseWeightText, type OcrRead } from './lib/ocr';
+import { OCR_MIN_CONFIDENCE, ocrToParsed, parseWeightText, warmOcrCache, type OcrRead } from './lib/ocr';
 import { toCartonRecord, toManualCartonRecord, type ManualEntryInput } from './lib/carton';
 import { exportSessionToXlsx } from './lib/export';
 import { signalSuccess, signalError } from './lib/feedback';
@@ -130,6 +130,16 @@ export default function App() {
     return () => {
       alive = false;
     };
+  }, []);
+
+  // Warm the OCR engine cache in the background while connectivity is likely.
+  // Each deploy renames the lazy tesseract chunk, so without this the first
+  // OCR use after an app update needs reception — which coolstores don't have.
+  // Delayed so it never competes with boot/camera startup; failures are
+  // swallowed inside warmOcrCache (offline open = try again next open).
+  useEffect(() => {
+    const t = window.setTimeout(() => void warmOcrCache(), 3000);
+    return () => window.clearTimeout(t);
   }, []);
 
   // Persist the in-progress session on every change; surface failures loudly —

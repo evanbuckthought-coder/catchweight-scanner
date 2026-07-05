@@ -46,7 +46,14 @@ export function useOcrEngine(enabled: boolean): {
       .catch((err) => {
         console.warn('OCR engine failed to load:', err);
         if (!cancelled) {
-          setMessage(err instanceof Error ? err.message : String(err));
+          const base = err instanceof Error ? err.message : String(err);
+          // The engine downloads once per app update; a load failure with no
+          // connectivity is almost always that download — say so plainly.
+          setMessage(
+            typeof navigator !== 'undefined' && navigator.onLine === false
+              ? `${base} — no internet: the engine downloads once after an app update, connect briefly and retry`
+              : base,
+          );
           setStatus('error');
         }
       })
