@@ -35,8 +35,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  const secret = process.env.TEACH_SHARED_SECRET;
+  // trim(): env values pasted on a phone often carry a stray newline/space,
+  // which makes the x-api-key header invalid and the fetch throw instantly.
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const secret = process.env.TEACH_SHARED_SECRET?.trim();
   if (!apiKey || !secret) {
     res.status(500).json({
       error: 'Teach service not configured — set ANTHROPIC_API_KEY and TEACH_SHARED_SECRET in Vercel',
@@ -120,6 +122,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(200).json({ ok: true, result: extractTeachJson(text) });
   } catch (err) {
     console.error('teach-label failed', err);
-    res.status(502).json({ error: 'Label analysis failed — check connectivity and try again' });
+    // detail: safe diagnostic (error class + message, any key-like string
+    // scrubbed). The app shows only `error`; detail is for curl debugging.
+    const detail =
+      err instanceof Error
+        ? `${err.name}: ${err.message} ${err.cause ?? ''}`.replace(/sk-ant-[\w-]+/g, '[key]').slice(0, 300)
+        : 'unknown';
+    res.status(502).json({ error: 'Label analysis failed — check connectivity and try again', detail });
   }
 }
