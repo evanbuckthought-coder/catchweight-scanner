@@ -284,7 +284,7 @@ export function TeachLabelFlow({ gtinProfiles, onUpsertGtinProfile, onSaved, onC
         </button>
         {analysing && (
           <p className="text-center text-xs text-slate-500">
-            Sending to the AI — needs connectivity, takes a few seconds…
+            Sending to the AI — needs connectivity, typically 15–30 seconds…
           </p>
         )}
 
