@@ -8,9 +8,8 @@ describe('searchSuppliers', () => {
   it('matches anywhere in the name, case-insensitive', () => {
     expect(searchSuppliers('silver')).toContain('Silver Fern Farms');
     expect(searchSuppliers('jbs')).toContain('JBS USA / Swift');
-    expect(searchSuppliers('hellaby')).toEqual(
-      expect.arrayContaining(['Wilson Hellaby', 'Auckland Meat Processors (AMP / Wilson Hellaby)']),
-    );
+    expect(searchSuppliers('hellaby')).toContain('Wilson Hellaby');
+    expect(searchSuppliers('mathias')).toContain('Farmlands Mathias');
   });
 
   it('ranks prefix matches ahead of contains-matches', () => {
