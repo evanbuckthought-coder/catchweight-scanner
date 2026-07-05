@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { searchSuppliers } from '../lib/suppliers';
 
 interface SessionSetupProps {
   scannedBy: string;
@@ -12,8 +13,19 @@ export function SessionSetup({ scannedBy, onStart, onEditName, onBack }: Session
   const [poRef, setPoRef] = useState('');
   const [supplier, setSupplier] = useState('');
   const [brand, setBrand] = useState('');
+  const [supplierFocused, setSupplierFocused] = useState(false);
 
   const canStart = poRef.trim().length > 0 && supplier.trim().length > 0;
+
+  // Type-ahead over the seed list + suppliers remembered from past sessions.
+  // Never forces a selection — free text is always accepted; hidden once the
+  // field holds exactly one of the known names.
+  const suggestions = useMemo(() => {
+    const matches = searchSuppliers(supplier);
+    if (matches.length === 1 && matches[0].toLowerCase() === supplier.trim().toLowerCase()) return [];
+    return matches;
+  }, [supplier]);
+  const showSuggestions = supplierFocused && suggestions.length > 0;
 
   return (
     <div className="flex min-h-screen flex-col gap-5 p-5">
@@ -46,14 +58,43 @@ export function SessionSetup({ scannedBy, onStart, onEditName, onBack }: Session
         />
       </label>
 
-      <label className="block text-sm font-medium text-slate-300">
+      <label className="relative block text-sm font-medium text-slate-300">
         Supplier *
         <input
+          data-testid="supplier-input"
           value={supplier}
           onChange={(e) => setSupplier(e.target.value)}
-          placeholder="Supplier name"
+          onFocus={() => setSupplierFocused(true)}
+          onBlur={() => setSupplierFocused(false)}
+          placeholder="Supplier name (type to search, or enter a new one)"
+          autoComplete="off"
           className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:ring-2 focus:ring-sky-400 focus:outline-none"
         />
+        {showSuggestions && (
+          <ul
+            data-testid="supplier-suggestions"
+            className="absolute inset-x-0 top-full z-20 mt-1 max-h-56 overflow-y-auto rounded-xl bg-slate-800 py-1 shadow-lg shadow-black/50 ring-1 ring-slate-600"
+          >
+            {suggestions.map((name, i) => (
+              <li key={name}>
+                <button
+                  type="button"
+                  data-testid={`supplier-suggestion-${i}`}
+                  // onMouseDown (not onClick): it fires BEFORE the input's blur,
+                  // so the tap isn't swallowed by the dropdown closing.
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setSupplier(name);
+                    setSupplierFocused(false);
+                  }}
+                  className="w-full px-3 py-2.5 text-left text-base font-normal text-slate-100 active:bg-slate-700"
+                >
+                  {name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </label>
 
       <label className="block text-sm font-medium text-slate-300">

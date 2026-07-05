@@ -13,6 +13,8 @@
  * with, so longer, more specific keys win if ever added.
  */
 
+import { STORAGE_KEYS, loadJSON, saveJSON } from './storage';
+
 export interface SupplierSeed {
   prefix: string;
   name: string;
@@ -39,4 +41,89 @@ export function suggestSupplier(gtin: string | undefined): string | undefined {
     }
   }
   return best?.name;
+}
+
+// ---------------------------------------------------------------------------
+// Supplier name list (New receival type-ahead)
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed list for the Supplier type-ahead — plain names, easy to edit. The
+ * field never forces a selection: any free-typed supplier is accepted and
+ * remembered on-device (rememberSupplier), so the list grows with use.
+ */
+export const SUPPLIER_NAMES: string[] = [
+  'Affco',
+  'Alliance Group',
+  'Andrews Meat Industries',
+  'ANZCO Foods',
+  'APJ Meats',
+  'Auckland Meat Processors (AMP / Wilson Hellaby)',
+  'Blue Sky Meats',
+  'Cabernet Foods',
+  'Crusader Meats',
+  'Fribin Foods',
+  'Freshpork',
+  'Greenlea Premier Meats',
+  'Green Meadows Beef',
+  'Hellers',
+  'JBS USA / Swift',
+  'JR Wholesale Meats',
+  'Ken Wilson Meats',
+  'Lanexco',
+  'Mainland Poultry',
+  'Markwell Foods',
+  'Ovation New Zealand',
+  'Pacific Pork',
+  'Progressive Meats',
+  'Silver Fern Farms',
+  'Smithfield',
+  'Taylor Preston',
+  'Tegel',
+  'Teys Australia',
+  'Universal Beef Packers',
+  'Van Den Brink Poultry',
+  'Wilson Hellaby',
+];
+
+/** Suppliers typed on New receival that aren't in the seed list (on-device). */
+export function loadCustomSuppliers(): string[] {
+  return loadJSON<string[]>(STORAGE_KEYS.customSuppliers, []);
+}
+
+/**
+ * Remember a free-typed supplier so it appears in the type-ahead next time.
+ * No-op for names already known (seed or custom, case-insensitive).
+ */
+export function rememberSupplier(name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  const key = trimmed.toLowerCase();
+  const known = [...SUPPLIER_NAMES, ...loadCustomSuppliers()];
+  if (known.some((n) => n.toLowerCase() === key)) return;
+  saveJSON(STORAGE_KEYS.customSuppliers, [...loadCustomSuppliers(), trimmed]);
+}
+
+/**
+ * Type-ahead matches for the Supplier field: case-insensitive, matching
+ * anywhere in the name; exact match first, then prefix matches, then
+ * contains-matches (alphabetical within each group).
+ */
+export function searchSuppliers(query: string, limit = 8): string[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const all = [...new Set([...SUPPLIER_NAMES, ...loadCustomSuppliers()])];
+  const rank = (name: string): number => {
+    const n = name.toLowerCase();
+    if (n === q) return 0;
+    if (n.startsWith(q)) return 1;
+    if (n.includes(q)) return 2;
+    return 3;
+  };
+  return all
+    .map((name) => ({ name, rank: rank(name) }))
+    .filter((e) => e.rank < 3)
+    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name))
+    .slice(0, limit)
+    .map((e) => e.name);
 }

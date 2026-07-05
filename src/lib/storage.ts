@@ -13,6 +13,8 @@ export const STORAGE_KEYS = {
   ocrProfiles: 'cw.ocrLabelProfiles',
   /** Test tools (simulated scans) visibility — OFF by default in production. */
   devTools: 'cw.devTools',
+  /** Supplier names typed on New receival that aren't in the seed list. */
+  customSuppliers: 'cw.customSuppliers',
   // NB: sessions now live in IndexedDB (see lib/persistence.ts). The legacy
   // localStorage session keys (cw.currentSession.v2/.v3/.v4) are imported and
   // migrated there on first boot.

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CartonRecord, GtinProfile, Session } from './types';
 import { parseGS1, type ParsedCarton } from './lib/gs1';
+import { rememberSupplier } from './lib/suppliers';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, removeProfile, upsertProfile } from './lib/profiles';
@@ -685,6 +686,8 @@ export default function App() {
 
   const startSession = useCallback(
     (poRef: string, supplier: string, brand: string | undefined) => {
+      // A free-typed supplier joins the type-ahead list for next time.
+      rememberSupplier(supplier);
       setSessionState({
         id: uid(),
         poRef,
