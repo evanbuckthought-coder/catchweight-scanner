@@ -22,7 +22,9 @@ import {
   extractTeachJson,
   validateTeachRequest,
   type TeachRequestBody,
-} from '../src/lib/teachShared';
+  // NB: the .js extension is required — the project is ESM ("type": "module"),
+  // and the Vercel Node runtime resolves relative imports per ESM rules.
+} from '../src/lib/teachShared.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-opus-4-8';
