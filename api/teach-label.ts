@@ -89,13 +89,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     });
 
     if (!aiRes.ok) {
-      const detail = await aiRes.text().catch(() => '');
-      console.error('Claude API error', aiRes.status, detail.slice(0, 500));
+      const detailText = await aiRes.text().catch(() => '');
+      console.error('Claude API error', aiRes.status, detailText.slice(0, 500));
+      // Surface the upstream error type/message (scrubbed of token-like runs)
+      // so misconfiguration is diagnosable — e.g. a billing error reads very
+      // differently from a malformed request.
+      let upstream: string;
+      try {
+        const parsed = JSON.parse(detailText) as { error?: { type?: string; message?: string } };
+        upstream = `${parsed.error?.type ?? '?'}: ${parsed.error?.message ?? '?'}`;
+      } catch {
+        upstream = detailText.slice(0, 200);
+      }
+      upstream = upstream.replace(/[A-Za-z0-9_-]{16,}/g, '[redacted]').slice(0, 300);
       res.status(502).json({
         error:
           aiRes.status === 401
             ? 'AI key rejected — check ANTHROPIC_API_KEY in Vercel'
             : `AI service error (${aiRes.status}) — try again`,
+        detail: upstream,
       });
       return;
     }
