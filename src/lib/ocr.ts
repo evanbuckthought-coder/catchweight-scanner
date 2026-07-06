@@ -398,70 +398,115 @@ export function parseWeightText(text: string): OcrWeight | null {
   };
 }
 
-/** The taught format a read must match (subset of a TaughtLabelMap). */
+/** The taught format used to pick the right number (subset of a TaughtLabelMap). */
 export interface TaughtExpectations {
   unit?: WeightUnit | null;
   decimalPlaces?: number | null;
   anchorText?: string | null;
 }
 
-export interface TaughtParse {
-  w: OcrWeight | null;
-  /** Set when a weight WAS read but doesn't match the taught format — the
-   *  caller shows this and keeps scanning instead of committing/warning. */
-  rejected?: string;
+/** One number found in the OCR text, with everything selection needs. */
+interface WeightCandidate extends OcrWeight {
+  /** Character index in the (comma-normalised) text — for anchor ordering. */
+  index: number;
+}
+
+/** Every weight-like number in the text, with adjacent-unit detection. */
+function extractWeightCandidates(text: string): WeightCandidate[] {
+  const cleaned = text.replace(/,/g, '.');
+  const hasKg = /kg/i.test(cleaned);
+  const hasLb = /lb|#/i.test(cleaned);
+  const out: WeightCandidate[] = [];
+  for (const m of cleaned.matchAll(/(?<!\d)(\d{1,4}(?:\.\d*)?)(?!\d)\s*(kg|lbs?|#)?/gi)) {
+    const numStr = m[1];
+    const value = Number.parseFloat(numStr);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const adjacent = m[2];
+    let unit: WeightUnit;
+    let unitExplicit = true;
+    if (adjacent) {
+      unit = /^k/i.test(adjacent) ? 'kg' : 'lb';
+    } else if (hasKg && !hasLb) {
+      unit = 'kg'; // one unit token somewhere in the line — counts as read
+    } else if (hasLb && !hasKg) {
+      unit = 'lb';
+    } else {
+      unit = 'kg'; // none, or BOTH (dual-print label) — a guess, force confirm
+      unitExplicit = false;
+    }
+    const hasDecimal = numStr.includes('.');
+    out.push({
+      value,
+      unit,
+      hasDecimal,
+      decimals: hasDecimal ? numStr.split('.')[1].length : undefined,
+      unitExplicit,
+      index: m.index,
+    });
+  }
+  return out;
 }
 
 /**
- * Profile-constrained weight parsing for taught labels:
- *  - anchor-guided: when the taught anchor text (e.g. "NET WEIGHT") appears
- *    in the read, prefer the number printed AFTER it — that's the net weight,
- *    not a gross/tare/code that happens to share the line;
- *  - format gate: reject reads whose explicit unit or decimal count
- *    contradicts the taught format (a 3-dp label read as "1864" or "18.6" is
- *    a misread, not a weight).
- * This CONSTRAINS which candidate reaches the existing guardrails — it never
- * relaxes them, and never supplies a weight value itself.
+ * Profile-guided weight parsing for taught labels. The taught format SELECTS
+ * the right number when several are read — it is NOT a pass/fail gate (a
+ * valid read must never be discarded for a format quibble; that shipped once
+ * and rejected correct reads in the field). Preference order, as a score:
+ *  - the number printed after the taught anchor text ("NET WEIGHT ▸ 14.54");
+ *  - the number carrying the taught unit — on dual-print labels (14.54 kg
+ *    over 32.06 lb) this locks onto the kg line and ignores the lb one;
+ *  - a number whose explicit unit CONTRADICTS the taught unit is picked only
+ *    as a last resort (and then converts correctly downstream anyway);
+ *  - the taught decimal count and decimal presence break remaining ties.
+ * Accept/reject stays where it belongs: the guardrails (1-40 kg range,
+ * missed-decimal, unit-not-read confirm) run on whatever is returned.
  */
-export function parseWeightTaught(text: string, expect?: TaughtExpectations | null): TaughtParse {
-  let w: OcrWeight | null = null;
+export function parseWeightTaught(text: string, expect?: TaughtExpectations | null): OcrWeight | null {
+  if (!expect) return parseWeightText(text);
+  const candidates = extractWeightCandidates(text);
+  if (candidates.length === 0) return null;
 
-  const anchorTokens = (expect?.anchorText ?? '')
+  // Where does the taught anchor end? (matched on the comma-normalised text,
+  // same coordinates as the candidate indices)
+  const anchorTokens = (expect.anchorText ?? '')
     .toLowerCase()
     .split(/[^a-z0-9#]+/)
     .filter((t) => t.length >= 2);
-  if (anchorTokens.length) {
-    const lower = text.toLowerCase();
-    let after = -1;
-    for (const t of anchorTokens) {
-      const i = lower.lastIndexOf(t);
-      if (i !== -1 && i + t.length > after) after = i + t.length;
-    }
-    if (after >= 0) w = parseWeightText(text.slice(after));
-    // The anchor slice can cut the unit off ("Net kg 12.43" sliced after
-    // "kg") — if the whole line reads the same value WITH its unit, use that.
-    if (w && !w.unitExplicit) {
-      const whole = parseWeightText(text);
-      if (whole && whole.value === w.value && whole.unitExplicit) w = whole;
-    }
+  const lower = text.replace(/,/g, '.').toLowerCase();
+  let anchorEnd = -1;
+  for (const t of anchorTokens) {
+    const i = lower.lastIndexOf(t);
+    if (i !== -1 && i + t.length > anchorEnd) anchorEnd = i + t.length;
   }
-  w ??= parseWeightText(text);
-  if (!w || !expect) return { w };
 
-  if (w.unitExplicit && expect.unit && w.unit !== expect.unit) {
-    return { w: null, rejected: `read ${w.unit} — this label is taught ${expect.unit}` };
-  }
-  if (expect.decimalPlaces != null) {
-    const readDp = w.hasDecimal ? (w.decimals ?? 0) : null;
-    if (readDp !== expect.decimalPlaces) {
-      const shown = w.hasDecimal ? w.value.toFixed(w.decimals ?? 0) : String(w.value);
-      return {
-        w: null,
-        rejected: `read ${shown} — taught format is ${expect.decimalPlaces} decimal${expect.decimalPlaces === 1 ? '' : 's'}`,
-      };
+  const score = (c: WeightCandidate): number => {
+    let s = 0;
+    if (anchorEnd >= 0 && c.index >= anchorEnd) s += 8;
+    if (expect.unit && c.unitExplicit) s += c.unit === expect.unit ? 4 : -4;
+    if (expect.decimalPlaces != null && c.hasDecimal && c.decimals === expect.decimalPlaces) s += 2;
+    if (c.hasDecimal) s += 1;
+    return s;
+  };
+
+  let best = candidates[0];
+  let bestScore = score(best);
+  for (const c of candidates.slice(1)) {
+    const s = score(c);
+    if (s > bestScore) {
+      best = c;
+      bestScore = s;
     }
   }
-  return { w };
+  const { value, unit, hasDecimal, decimals, unitExplicit } = best;
+  // A guessed unit resolves to the taught unit (still flagged not-explicit,
+  // so the unit-confirm guardrail fires as always).
+  return {
+    value,
+    unit: unitExplicit ? unit : (expect.unit ?? unit),
+    hasDecimal,
+    decimals,
+    unitExplicit,
+  };
 }
 
 /**

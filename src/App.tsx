@@ -403,18 +403,16 @@ export default function App() {
     ({ text, confidence }: OcrRead) => {
       if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
 
-      // Taught-profile-constrained parse: anchor-guided candidate selection,
-      // and reads whose unit/decimals contradict the taught format are
-      // rejected here (with visible feedback) instead of reaching the tally.
-      const { w, rejected } = parseWeightTaught(text, ocrProfile?.data ?? undefined);
-      if (rejected) {
-        signalError();
-        setOcrFeedback(`Ignored: ${rejected} — tap again`);
-        return;
-      }
+      // Taught-profile-GUIDED parse: the taught anchor/unit/decimals SELECT
+      // the right number when several are read (dual kg/lb prints, stray
+      // digits) — they never reject a read outright. Accept/reject belongs
+      // to the guardrails below.
+      const w = parseWeightTaught(text, ocrProfile?.data ?? undefined);
       if (!w) {
         signalError();
-        setOcrFeedback('No weight read — line it up in the box and tap again');
+        // Show what OCR actually saw so a misread is debuggable on the spot.
+        const seen = text.trim().replace(/\s+/g, ' ').slice(0, 32);
+        setOcrFeedback(seen ? `No weight read (saw “${seen}”) — tap again` : 'No weight read — line it up in the box and tap again');
         return;
       }
 
@@ -422,7 +420,7 @@ export default function App() {
       // auto-counts.
       if (confidence < getOcrMinConfidence()) {
         signalError();
-        setOcrFeedback(`Low confidence (${Math.round(confidence)}%) — hold steady and tap again`);
+        setOcrFeedback(`Low confidence (${Math.round(confidence)}%) reading “${w.value}” — hold steady and tap again`);
         return;
       }
 

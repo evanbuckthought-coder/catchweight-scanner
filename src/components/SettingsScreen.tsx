@@ -199,7 +199,7 @@ export function SettingsScreen({
         />
         <p className="mt-1 text-xs text-slate-500">
           Captures reading below this are rejected with “tap again”. Lower = accepts reads faster;
-          the 1–40 kg, decimal and taught-format guardrails still apply to every read.
+          the 1–40 kg and decimal guardrails still apply to every read.
         </p>
       </div>
 

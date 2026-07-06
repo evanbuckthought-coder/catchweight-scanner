@@ -75,16 +75,37 @@ describe('OCR confidence gate setting', () => {
 });
 
 describe('parseWeightTaught', () => {
+  const taughtKg2dp = { unit: 'kg' as const, decimalPlaces: 2, anchorText: 'Nett Weight' };
+
   it('without expectations behaves like plain parsing', () => {
-    const { w, rejected } = parseWeightTaught('18.82 kg');
-    expect(rejected).toBeUndefined();
-    expect(w).toMatchObject({ value: 18.82, unit: 'kg', unitExplicit: true });
+    expect(parseWeightTaught('18.82 kg')).toMatchObject({ value: 18.82, unit: 'kg', unitExplicit: true });
+  });
+
+  it('a valid read matching the taught format passes, obviously', () => {
+    expect(parseWeightTaught('14.54 kg', taughtKg2dp)).toMatchObject({
+      value: 14.54,
+      unit: 'kg',
+      unitExplicit: true,
+      hasDecimal: true,
+    });
+  });
+
+  it('locks onto the kg value on a dual-print label, either order', () => {
+    // Taylor Preston style: "14.54 kg" stacked over "32.06 lb"
+    expect(parseWeightTaught('Nett Weight 14.54 kg 32.06 lb', taughtKg2dp)?.value).toBe(14.54);
+    expect(parseWeightTaught('32.06 lb 14.54 kg', taughtKg2dp)?.value).toBe(14.54);
+    expect(parseWeightTaught('32.06 lb 14.54 kg', taughtKg2dp)?.unit).toBe('kg');
+  });
+
+  it('the field bug: a stray fragment digit must not beat the real weight', () => {
+    // OCR caught a stray "2" (edge of the lb line) alongside the true value —
+    // the old code rejected the whole read; now selection picks 14.54.
+    expect(parseWeightTaught('2 14.54 kg', taughtKg2dp)?.value).toBe(14.54);
+    expect(parseWeightTaught('14.54 2', taughtKg2dp)?.value).toBe(14.54);
   });
 
   it('prefers the number after the taught anchor text', () => {
-    // Plain parsing would take 19.20 (first decimal number); the anchor
-    // steers to the net weight that follows it.
-    const { w } = parseWeightTaught('GROSS 19.20 NET 18.82', {
+    const w = parseWeightTaught('GROSS 19.20 NET 18.82', {
       unit: 'kg',
       decimalPlaces: 2,
       anchorText: 'NET WEIGHT',
@@ -92,47 +113,39 @@ describe('parseWeightTaught', () => {
     expect(w?.value).toBe(18.82);
   });
 
-  it('recovers the explicit unit when the anchor slice cuts it off', () => {
-    // Anchor "Net kg" ends after "kg", slicing the unit away from "12.43" —
-    // the whole-line parse restores unitExplicit.
-    const { w } = parseWeightTaught('Net kg 12.43', {
-      unit: 'kg',
-      decimalPlaces: 2,
-      anchorText: 'Net kg',
+  it('keeps the explicit unit when the anchor contains the unit word', () => {
+    expect(parseWeightTaught('Net kg 12.43', { unit: 'kg', decimalPlaces: 2, anchorText: 'Net kg' })).toMatchObject(
+      { value: 12.43, unit: 'kg', unitExplicit: true },
+    );
+  });
+
+  it('never rejects for a format quibble — decimals are a hint, not a gate', () => {
+    // wrong decimal count, integer-only, trailing dot: all still returned;
+    // the missed-decimal/range guardrails decide what happens next.
+    expect(parseWeightTaught('18.6 kg', taughtKg2dp)?.value).toBe(18.6);
+    expect(parseWeightTaught('1864', taughtKg2dp)?.value).toBe(1864);
+    expect(parseWeightTaught('18. kg', taughtKg2dp)?.value).toBe(18);
+  });
+
+  it('an lb-only read on a kg-taught label is kept (converts correctly downstream)', () => {
+    // The crop caught only the lb line: 32.06 lb IS the same weight as
+    // 14.54 kg — the explicit unit makes the downstream conversion right.
+    expect(parseWeightTaught('32.06 lb', taughtKg2dp)).toMatchObject({
+      value: 32.06,
+      unit: 'lb',
+      unitExplicit: true,
     });
-    expect(w).toMatchObject({ value: 12.43, unit: 'kg' });
   });
 
-  it('rejects an explicit unit that contradicts the taught unit', () => {
-    // e.g. the lb line of a dual-print label when the label is taught kg
-    const { w, rejected } = parseWeightTaught('41.5 lb', { unit: 'kg', decimalPlaces: 2 });
-    expect(w).toBeNull();
-    expect(rejected).toMatch(/lb/);
-    expect(rejected).toMatch(/kg/);
-  });
-
-  it('rejects reads whose decimal count contradicts the taught format', () => {
-    const expectations = { unit: 'kg' as const, decimalPlaces: 2 };
-    expect(parseWeightTaught('1864', expectations).rejected).toMatch(/1864.*2 decimals/);
-    expect(parseWeightTaught('18.6 kg', expectations).rejected).toMatch(/18\.6.*2 decimals/);
-    expect(parseWeightTaught('18. kg', expectations).rejected).toBeTruthy();
-  });
-
-  it('accepts reads matching the taught format', () => {
-    const { w, rejected } = parseWeightTaught('NET WEIGHT 18.82 kg', {
+  it('a unit-less read resolves to the taught unit but still forces the confirm', () => {
+    expect(parseWeightTaught('14.54', taughtKg2dp)).toMatchObject({
+      value: 14.54,
       unit: 'kg',
-      decimalPlaces: 2,
-      anchorText: 'NET WEIGHT',
+      unitExplicit: false, // unit-not-read guardrail fires as always
     });
-    expect(rejected).toBeUndefined();
-    expect(w).toMatchObject({ value: 18.82, unit: 'kg', hasDecimal: true });
   });
 
-  it('leaves format-checking to the guardrails when nothing was taught about it', () => {
-    // decimalPlaces null -> integer reads pass through so the missed-decimal
-    // guardrail (not this filter) handles them.
-    const { w, rejected } = parseWeightTaught('1864', { unit: 'kg', decimalPlaces: null });
-    expect(rejected).toBeUndefined();
-    expect(w?.value).toBe(1864);
+  it('returns null only when no number was read at all', () => {
+    expect(parseWeightTaught('KEEP REFRIGERATED', taughtKg2dp)).toBeNull();
   });
 });
