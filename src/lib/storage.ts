@@ -17,6 +17,8 @@ export const STORAGE_KEYS = {
   customSuppliers: 'cw.customSuppliers',
   /** Tuned OCR confidence gate (Settings) — see lib/ocr.ts getOcrMinConfidence. */
   ocrMinConfidence: 'cw.ocrMinConfidence',
+  /** Manual-keypad unit (kg default; persists so lb suppliers set it once). */
+  manualUnit: 'cw.manualUnit',
   // NB: sessions now live in IndexedDB (see lib/persistence.ts). The legacy
   // localStorage session keys (cw.currentSession.v2/.v3/.v4) are imported and
   // migrated there on first boot.

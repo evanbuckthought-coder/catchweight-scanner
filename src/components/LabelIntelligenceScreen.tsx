@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { GtinProfile } from '../types';
 import { loadOcrProfiles, removeOcrProfile, type OcrLabelProfile } from '../lib/ocrProfiles';
 import { TeachLabelFlow } from './TeachLabelFlow';
+import { OcrTrialScreen } from './OcrTrialScreen';
 
 interface LabelIntelligenceScreenProps {
   /** Saved GTIN profiles (App owns this state so capture prefills stay fresh). */
@@ -10,17 +11,9 @@ interface LabelIntelligenceScreenProps {
   /** Create/update a GTIN profile (used by Teach a new label). */
   onUpsertProfile: (profile: GtinProfile) => void;
   onBack: () => void;
-  /** Open straight into a sub-view (the OCR teach gate jumps to 'teach'). */
-  initialSub?: 'menu' | 'teach';
-  /**
-   * Set when launched from the in-session OCR gate: teach save/cancel returns
-   * straight to the capture screen instead of the Label Intelligence menu
-   * (savedName present = a profile was saved).
-   */
-  onCaptureReturn?: (savedName?: string) => void;
 }
 
-type SubView = 'menu' | 'teach' | 'gtin' | 'ocr';
+type SubView = 'menu' | 'teach' | 'gtin' | 'ocr' | 'ocrtrial';
 
 /**
  * Label Intelligence: the home for everything that teaches the app about
@@ -33,10 +26,8 @@ export function LabelIntelligenceScreen({
   onDeleteProfile,
   onUpsertProfile,
   onBack,
-  initialSub,
-  onCaptureReturn,
 }: LabelIntelligenceScreenProps) {
-  const [sub, setSub] = useState<SubView>(initialSub ?? 'menu');
+  const [sub, setSub] = useState<SubView>('menu');
   const [openGtin, setOpenGtin] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [ocrProfiles, setOcrProfiles] = useState<OcrLabelProfile[]>(() => loadOcrProfiles());
@@ -68,16 +59,22 @@ export function LabelIntelligenceScreen({
           gtinProfiles={profiles}
           onUpsertGtinProfile={onUpsertProfile}
           onSaved={(name) => {
-            if (onCaptureReturn) {
-              onCaptureReturn(name);
-              return;
-            }
             setOcrProfiles(loadOcrProfiles());
             setSavedNote(name);
             setSub('menu');
           }}
-          onCancel={() => (onCaptureReturn ? onCaptureReturn() : setSub('menu'))}
+          onCancel={() => setSub('menu')}
         />
+      </div>
+    );
+  }
+
+  // ---- OCR weight capture (experimental trial harness) ---------------------
+  if (sub === 'ocrtrial') {
+    return (
+      <div className="mx-auto flex min-h-screen max-w-md flex-col gap-4 p-4">
+        {header('OCR (experimental)', () => setSub('menu'))}
+        <OcrTrialScreen onTeach={() => setSub('teach')} />
       </div>
     );
   }
@@ -324,6 +321,23 @@ export function LabelIntelligenceScreen({
         🔤 OCR label profiles
         <span className="block text-xs font-normal text-slate-500">
           {ocrProfiles.length} saved · created by Teach a new label
+        </span>
+      </button>
+
+      <button
+        type="button"
+        data-testid="labels-ocrtrial"
+        onClick={() => setSub('ocrtrial')}
+        className="rounded-xl bg-slate-800 px-4 py-4 text-left ring-1 ring-slate-600 active:bg-slate-700"
+      >
+        <span className="flex items-center justify-between text-base font-semibold text-slate-200">
+          🔬 OCR weight capture
+          <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-300 ring-1 ring-amber-500/40">
+            Experimental
+          </span>
+        </span>
+        <span className="block text-xs font-normal text-slate-500">
+          Trial tap-to-capture reads against a taught label — nothing is counted
         </span>
       </button>
     </div>

@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CartonRecord, GtinProfile, Session } from './types';
 import { parseGS1, type ParsedCarton } from './lib/gs1';
 import { rememberSupplier } from './lib/suppliers';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, removeProfile, upsertProfile } from './lib/profiles';
-import { findProfileForCapture, taughtFormatHint } from './lib/ocrProfiles';
 import {
   allCartons,
   findDuplicate,
@@ -17,14 +16,7 @@ import {
 } from './lib/session';
 import { loadActiveSession, saveActiveSession, saveReceival } from './lib/persistence';
 import { weightWarnings } from './lib/guardrails';
-import {
-  getOcrMinConfidence,
-  ocrToParsed,
-  parseWeightTaught,
-  regionFromProfile,
-  warmOcrCache,
-  type OcrRead,
-} from './lib/ocr';
+import { warmOcrCache } from './lib/ocr';
 import { toCartonRecord, toManualCartonRecord, type ManualEntryInput } from './lib/carton';
 import { exportSessionToXlsx } from './lib/export';
 import { signalSuccess, signalError } from './lib/feedback';
@@ -33,12 +25,11 @@ import { useLocalStorage } from './hooks/useLocalStorage';
 import { SetupScreen } from './components/SetupScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { SessionSetup } from './components/SessionSetup';
-import { ScannerView, type ScanMode } from './components/ScannerView';
+import { ScannerView } from './components/ScannerView';
 import { Readout } from './components/Readout';
 import { CartonList } from './components/CartonList';
 import { DevPanel } from './components/DevPanel';
 import { SettingsMenu } from './components/SettingsMenu';
-import { OcrGateSheet } from './components/OcrGateSheet';
 import { SettingsScreen } from './components/SettingsScreen';
 import { LabelIntelligenceScreen } from './components/LabelIntelligenceScreen';
 import { SummaryScreen } from './components/SummaryScreen';
@@ -47,7 +38,7 @@ import { ResumePrompt } from './components/ResumePrompt';
 import { ConfirmSheet, type PendingConfirm } from './components/ConfirmSheet';
 import { LabelChangeSheet } from './components/LabelChangeSheet';
 import { WeightConfirmSheet } from './components/WeightConfirmSheet';
-import { ManualEntrySheet } from './components/ManualEntrySheet';
+import { ManualKeypad } from './components/ManualKeypad';
 
 type ToastKind = 'info' | 'warn' | 'error';
 interface Toast {
@@ -59,14 +50,11 @@ interface LabelIssue {
   parsed: ParsedCarton;
 }
 
-/** A captured weight awaiting human confirmation (failed a guardrail). */
+/** A barcode-captured weight awaiting human confirmation (failed a guardrail). */
 interface WeightPending {
   warnings: string[];
   productName: string;
-  /** Barcode capture (exactly one of parsed/ocr is set). */
-  parsed?: ParsedCarton;
-  /** OCR capture. */
-  ocr?: { value: number; unit: WeightUnit; kg: number; text: string };
+  parsed: ParsedCarton;
 }
 
 /** Ignore the identical decoded string while it stays in view (sliding window). */
@@ -167,21 +155,17 @@ export default function App() {
     'home' | 'resume-guard' | 'session-setup' | 'capture' | 'history' | 'labels' | 'settings'
   >('home');
   const [view, setView] = useState<'scan' | 'summary'>('scan');
-  const [mode, setMode] = useState<ScanMode>('barcode');
+  /** Capture mode: barcode camera, or the manual-entry keypad (primary modes).
+   *  OCR lives in Label Intelligence as an experimental trial, off this path. */
+  const [mode, setMode] = useState<'barcode' | 'manual'>('barcode');
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const [labelIssue, setLabelIssue] = useState<LabelIssue | null>(null);
   const [weightPending, setWeightPending] = useState<WeightPending | null>(null);
-  const [manualOpen, setManualOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
-  const [ocrFeedback, setOcrFeedback] = useState('');
-  /** The OCR teach gate sheet ("this label hasn't been taught yet"). */
-  const [ocrGate, setOcrGate] = useState(false);
-  /** Where Label Intelligence should return to (the OCR gate launches it from capture). */
-  const [labelsReturn, setLabelsReturn] = useState<'home' | 'capture'>('home');
-  /** Open Label Intelligence straight on the teach flow (set by the OCR gate). */
-  const [labelsTeach, setLabelsTeach] = useState(false);
+  /** Manual-keypad unit — kg default, persisted so lb suppliers set it once. */
+  const [manualUnit, setManualUnit] = useLocalStorage<WeightUnit>(STORAGE_KEYS.manualUnit, 'kg');
 
   const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
   /**
@@ -191,8 +175,8 @@ export default function App() {
    */
   const sheetGateRef = useRef(false);
   useEffect(() => {
-    sheetGateRef.current = !!(pending || labelIssue || weightPending || manualOpen || ocrGate);
-  }, [pending, labelIssue, weightPending, manualOpen, ocrGate]);
+    sheetGateRef.current = !!(pending || labelIssue || weightPending);
+  }, [pending, labelIssue, weightPending]);
 
   useEffect(() => {
     if (!toast) return;
@@ -200,45 +184,9 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  useEffect(() => {
-    if (!ocrFeedback) return;
-    const t = setTimeout(() => setOcrFeedback(''), 4000);
-    return () => clearTimeout(t);
-  }, [ocrFeedback]);
-
   const showToast = useCallback((text: string, kind: ToastKind = 'info') => {
     setToast({ text, kind });
   }, []);
-
-  // --- OCR label profile (mandatory for OCR mode) ----------------------------
-
-  /**
-   * The taught profile for the current capture context, resolved AUTOMATICALLY:
-   * manufacturer via the active product's GTIN prefix where a barcode has been
-   * scanned, else the session's supplier. `nav` is a dependency on purpose —
-   * profiles live in localStorage, and returning from the teach flow (a nav
-   * change) must pick up a just-taught label.
-   */
-  const ocrProfile = useMemo(() => {
-    if (!session) return undefined;
-    const prod = session.products.find((p) => p.id === session.activeProductId);
-    return findProfileForCapture(prod?.gtin, session.supplier);
-  }, [session, nav]);
-  // Taught profile present -> tight crop positioned at the taught zone.
-  const ocrRegion = useMemo(() => regionFromProfile(ocrProfile?.data), [ocrProfile]);
-  const ocrHint = ocrProfile?.data ? taughtFormatHint(ocrProfile.data) : undefined;
-
-  /**
-   * MANDATORY teach gate: OCR mode may only run with a taught profile. This
-   * also catches the profile disappearing under an active OCR session (product
-   * switch, profile deleted mid-receival) — drop back to barcode + explain.
-   */
-  useEffect(() => {
-    if (mode === 'ocr' && !ocrProfile) {
-      setMode('barcode');
-      setOcrGate(true);
-    }
-  }, [mode, ocrProfile]);
 
   // --- counting -------------------------------------------------------------
 
@@ -268,46 +216,6 @@ export default function App() {
       });
       signalSuccess();
       showToast(`Counted · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
-    },
-    [scannedBy, showToast],
-  );
-
-  /** Append an OCR-read carton (inherits GTIN + batch from the product). */
-  const commitOcr = useCallback(
-    (ocr: { value: number; unit: WeightUnit; kg: number; text: string }) => {
-      const cur = sessionRef.current;
-      const active = cur?.products.find((p) => p.id === cur.activeProductId);
-      if (!cur || !active) {
-        signalError();
-        showToast('No active product — carton NOT counted', 'error');
-        return;
-      }
-      setSessionState((prev) => {
-        if (!prev) return prev;
-        const activeNow = prev.products.find((p) => p.id === prev.activeProductId);
-        if (!activeNow) return prev;
-        const batch = productCartons(activeNow).at(-1)?.batch;
-        const parsed = ocrToParsed(
-          { value: ocr.value, unit: ocr.unit, text: ocr.text },
-          { gtin: activeNow.gtin || undefined, batch },
-        );
-        const record = toCartonRecord(parsed, {
-          scannedBy,
-          poRef: prev.poRef,
-          supplier: prev.supplier,
-          brand: prev.brand,
-          product: activeNow.product,
-          entry: 'ocr',
-        });
-        return withCartonAppended(prev, record);
-      });
-      signalSuccess();
-      const msg =
-        ocr.unit === 'lb'
-          ? `${ocr.value} lb → ${roundKg(ocr.kg).toFixed(2)} kg`
-          : `${roundKg(ocr.kg).toFixed(2)} kg`;
-      setOcrFeedback(`✓ ${msg}`);
-      showToast(`Counted (OCR) · ${msg}`, 'info');
     },
     [scannedBy, showToast],
   );
@@ -391,92 +299,6 @@ export default function App() {
       commitScanned(parsed);
     },
     [session, boot, view, profiles, scanWeightWarnings, commitScanned, showToast],
-  );
-
-  /**
-   * Single entry point for OCR reads (tap-to-capture + test feed). Each read
-   * is a deliberate user action now, so EVERY outcome gives feedback — the
-   * old continuous-loop throttles/cooldowns are gone. Auto-accepts a read
-   * that passes every check; interrupts only when one fails.
-   */
-  const handleOcrRead = useCallback(
-    ({ text, confidence }: OcrRead) => {
-      if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
-
-      // Taught-profile-GUIDED parse: the taught anchor/unit/decimals SELECT
-      // the right number when several are read (dual kg/lb prints, stray
-      // digits) — they never reject a read outright. Accept/reject belongs
-      // to the guardrails below.
-      const w = parseWeightTaught(text, ocrProfile?.data ?? undefined);
-      if (!w) {
-        signalError();
-        // Show what OCR actually saw so a misread is debuggable on the spot.
-        const seen = text.trim().replace(/\s+/g, ' ').slice(0, 32);
-        setOcrFeedback(seen ? `No weight read (saw “${seen}”) — tap again` : 'No weight read — line it up in the box and tap again');
-        return;
-      }
-
-      // Check 1: OCR confidence (tunable in Settings). A shaky read never
-      // auto-counts.
-      if (confidence < getOcrMinConfidence()) {
-        signalError();
-        setOcrFeedback(`Low confidence (${Math.round(confidence)}%) reading “${w.value}” — hold steady and tap again`);
-        return;
-      }
-
-      const active = session.products.find((p) => p.id === session.activeProductId) ?? null;
-
-      // Check 2: the unit must have been READ, not guessed — a lb label read
-      // without its unit would otherwise enter as kg, off by 2.2x. When
-      // guessed, default to the product's known unit, else the supplier's
-      // taught label profile — and always force a confirm (a taught profile
-      // biases the assumption; it never bypasses the check).
-      let unit = w.unit;
-      const warnings: string[] = [];
-      if (!w.unitExplicit) {
-        const productUnit = active ? productCartons(active).at(-1)?.unit : undefined;
-        const taughtUnit = ocrProfile?.data?.unit ?? undefined;
-        unit = productUnit ?? taughtUnit ?? w.unit;
-        warnings.push(
-          `Unit not read from the label — assumed ${unit}${
-            !productUnit && taughtUnit ? ' (from this label’s taught profile)' : ''
-          }. Confirm against the carton.`,
-        );
-      }
-
-      const kg = toKg(w.value, unit);
-      // Checks 3 + 4: range (after lb->kg) and expected decimal shape.
-      warnings.push(...weightWarnings({ weightKg: kg, hasDecimal: w.hasDecimal, requireDecimal: true }));
-
-      // First carton of a (new) product via OCR -> product confirm (safety rule
-      // applies to every product regardless of capture mode).
-      if (!active) {
-        sheetGateRef.current = true;
-        setPending({
-          parsed: ocrToParsed({ value: w.value, unit, text }),
-          product: '',
-          isNewGtin: false,
-          weightWarnings: warnings,
-          entry: 'ocr',
-        });
-        return;
-      }
-
-      if (warnings.length) {
-        signalError();
-        sheetGateRef.current = true;
-        setWeightPending({
-          ocr: { value: w.value, unit, kg, text },
-          warnings,
-          productName: active.product,
-        });
-        return;
-      }
-
-      // All checks passed -> auto-capture. Beep, tally, next carton.
-      commitOcr({ value: w.value, unit, kg, text });
-    },
-    [session, boot, view, commitOcr, ocrProfile],
   );
 
   /** Confirm the first carton of a product: create it (pallet 1), or continue
@@ -599,10 +421,9 @@ export default function App() {
 
   const confirmWeight = useCallback(() => {
     if (!weightPending) return;
-    if (weightPending.parsed) commitScanned(weightPending.parsed);
-    else if (weightPending.ocr) commitOcr(weightPending.ocr);
+    commitScanned(weightPending.parsed);
     setWeightPending(null);
-  }, [weightPending, commitScanned, commitOcr]);
+  }, [weightPending, commitScanned]);
 
   // --- pallet / product / session controls ------------------------------------
 
@@ -614,7 +435,7 @@ export default function App() {
   const nextProduct = useCallback(() => {
     setSessionState((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
     lastDecodeRef.current = { raw: '', time: 0 };
-    setMode('barcode'); // OCR is opted into per product
+    setMode('barcode'); // next product starts with its first-carton scan
   }, []);
 
   const addManualCarton = useCallback(
@@ -624,7 +445,6 @@ export default function App() {
       if (!cur || !active) {
         signalError();
         showToast('No active product — carton NOT counted', 'error');
-        setManualOpen(false);
         return;
       }
       setSessionState((prev) => {
@@ -643,7 +463,6 @@ export default function App() {
       });
       signalSuccess();
       showToast(`Added ${roundKg(toKg(input.netWeight, input.unit)).toFixed(2)} kg (manual)`, 'info');
-      setManualOpen(false);
     },
     [scannedBy, showToast],
   );
@@ -811,34 +630,7 @@ export default function App() {
         profiles={profiles}
         onDeleteProfile={deleteGtinProfile}
         onUpsertProfile={upsertGtinProfile}
-        initialSub={labelsTeach ? 'teach' : 'menu'}
-        onCaptureReturn={
-          labelsReturn === 'capture'
-            ? (savedName) => {
-                setLabelsTeach(false);
-                setNav('capture');
-                if (!savedName) return; // teach cancelled — back to barcode mode
-                const cur = sessionRef.current;
-                const prod = cur?.products.find((p) => p.id === cur.activeProductId);
-                const match = cur ? findProfileForCapture(prod?.gtin, cur.supplier) : undefined;
-                if (match) {
-                  // "Returns to the session ready to OCR": arm OCR directly.
-                  setMode('ocr');
-                  showToast(`Label “${savedName}” taught — OCR ready`, 'info');
-                } else {
-                  showToast(
-                    `Saved “${savedName}”, but it doesn’t match supplier “${cur?.supplier ?? ''}” — OCR stays locked`,
-                    'warn',
-                  );
-                }
-              }
-            : undefined
-        }
-        onBack={() => {
-          setLabelsTeach(false);
-          setNav(labelsReturn === 'capture' ? 'capture' : 'home');
-          setLabelsReturn('home');
-        }}
+        onBack={() => setNav('home')}
       />
     );
   }
@@ -906,11 +698,7 @@ export default function App() {
             setNav('capture');
           }}
           onHistory={() => setNav('history')}
-          onLabels={() => {
-            setLabelsReturn('home');
-            setLabelsTeach(false);
-            setNav('labels');
-          }}
+          onLabels={() => setNav('labels')}
           onSettings={() => setNav('settings')}
         />
       </>
@@ -980,20 +768,26 @@ export default function App() {
         </button>
       </header>
 
-      <ScannerView
-        active
-        paused={!!pending || !!labelIssue || !!weightPending || manualOpen || ocrGate}
-        mode={mode}
-        onDecode={handleDecode}
-        onOcrRead={handleOcrRead}
-        ocrFeedback={ocrFeedback}
-        ocrRegion={ocrRegion}
-        ocrProfileName={ocrProfile?.name}
-        ocrHint={ocrHint}
-      />
+      {mode === 'barcode' ? (
+        <ScannerView
+          active
+          paused={!!pending || !!labelIssue || !!weightPending}
+          mode="barcode"
+          onDecode={handleDecode}
+          onOcrRead={() => {}}
+        />
+      ) : (
+        <ManualKeypad
+          productName={activeProduct?.product ?? null}
+          lastBatch={lastBatch}
+          unit={manualUnit}
+          onUnitChange={setManualUnit}
+          onCommit={(netWeight, unit) => addManualCarton({ netWeight, unit, batch: lastBatch })}
+        />
+      )}
 
-      {/* Capture mode: barcode is primary; OCR is opted into per product when
-          the barcodes don't carry weight. */}
+      {/* Capture modes: barcode camera, or the manual keypad (damaged/unreadable
+          barcodes). OCR lives in Label Intelligence as an experimental trial. */}
       <div className="flex overflow-hidden rounded-xl text-sm font-semibold ring-1 ring-slate-600">
         <button
           type="button"
@@ -1007,35 +801,15 @@ export default function App() {
         </button>
         <button
           type="button"
-          data-testid="mode-ocr"
-          // Mandatory gate: no taught profile -> the teach sheet, never blind OCR.
-          onClick={() => (ocrProfile ? setMode('ocr') : setOcrGate(true))}
+          data-testid="mode-manual"
+          onClick={() => setMode('manual')}
           className={`flex-1 py-2.5 ${
-            mode === 'ocr' ? 'bg-emerald-500 text-slate-900' : 'bg-slate-800 text-slate-300'
+            mode === 'manual' ? 'bg-emerald-500 text-slate-900' : 'bg-slate-800 text-slate-300'
           }`}
         >
-          🔤 OCR weight
+          ✎ Manual entry
         </button>
       </div>
-
-      {mode === 'ocr' && ocrFeedback && (
-        <div
-          data-testid="ocr-feedback"
-          className="rounded-lg bg-slate-800/70 px-3 py-1.5 text-center text-sm font-medium text-slate-200 ring-1 ring-slate-700"
-        >
-          {ocrFeedback}
-        </div>
-      )}
-
-      <button
-        type="button"
-        data-testid="manual-entry"
-        disabled={!activeProduct}
-        onClick={() => activeProduct && setManualOpen(true)}
-        className="rounded-xl bg-slate-800 py-2.5 text-sm font-semibold text-slate-200 ring-1 ring-slate-600 active:bg-slate-700 disabled:opacity-40"
-      >
-        ✎ Enter manually (barcode won’t scan)
-      </button>
 
       <Readout
         activeProductName={activeProduct?.product}
@@ -1085,7 +859,7 @@ export default function App() {
       </div>
 
       {devTools && (
-        <DevPanel onSimulate={handleDecode} onSimulateOcr={(text, confidence) => handleOcrRead({ text, confidence })} />
+        <DevPanel onSimulate={handleDecode} />
       )}
 
       {activePallet ? (
@@ -1123,41 +897,14 @@ export default function App() {
 
       {weightPending && (
         <WeightConfirmSheet
-          weightKg={weightPending.parsed?.weightKg ?? weightPending.ocr?.kg ?? 0}
-          netWeight={weightPending.parsed?.netWeight ?? weightPending.ocr?.value ?? 0}
-          unit={weightPending.parsed?.weightUnit ?? weightPending.ocr?.unit ?? 'kg'}
-          gtin={weightPending.parsed?.gtin}
+          weightKg={weightPending.parsed.weightKg ?? 0}
+          netWeight={weightPending.parsed.netWeight ?? 0}
+          unit={weightPending.parsed.weightUnit ?? 'kg'}
+          gtin={weightPending.parsed.gtin}
           warnings={weightPending.warnings}
           productName={weightPending.productName}
           onConfirm={confirmWeight}
           onCancel={() => setWeightPending(null)}
-        />
-      )}
-
-      {manualOpen && activeProduct && (
-        <ManualEntrySheet
-          productName={activeProduct.product}
-          currentBatch={lastBatch}
-          onSubmit={addManualCarton}
-          onCancel={() => setManualOpen(false)}
-        />
-      )}
-
-      {ocrGate && (
-        <OcrGateSheet
-          supplier={session.supplier}
-          canManual={!!activeProduct}
-          onTeach={() => {
-            setOcrGate(false);
-            setLabelsReturn('capture');
-            setLabelsTeach(true);
-            setNav('labels');
-          }}
-          onManual={() => {
-            setOcrGate(false);
-            setManualOpen(true);
-          }}
-          onClose={() => setOcrGate(false)}
         />
       )}
 

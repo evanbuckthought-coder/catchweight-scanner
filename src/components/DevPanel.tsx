@@ -4,8 +4,6 @@ import { SAMPLE_LABELS } from '../lib/testData';
 interface DevPanelProps {
   /** Feed a GS1 string into the same pipeline a real scan uses. */
   onSimulate: (code: string) => void;
-  /** Feed a fake OCR read into the same pipeline the camera OCR uses. */
-  onSimulateOcr: (text: string, confidence: number) => void;
 }
 
 /**
@@ -13,10 +11,9 @@ interface DevPanelProps {
  * physical carton (handy for testing on the phone too), plus a manual paste box
  * for arbitrary GS1-128 strings.
  */
-export function DevPanel({ onSimulate, onSimulateOcr }: DevPanelProps) {
+export function DevPanel({ onSimulate }: DevPanelProps) {
   const [open, setOpen] = useState(false);
   const [manual, setManual] = useState('');
-  const [ocrText, setOcrText] = useState('');
 
   return (
     <div className="rounded-xl bg-slate-800/50 ring-1 ring-slate-700">
@@ -63,35 +60,6 @@ export function DevPanel({ onSimulate, onSimulateOcr }: DevPanelProps) {
               className="rounded-lg bg-sky-500 px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-40"
             >
               Feed
-            </button>
-          </div>
-
-          {/* Simulated OCR read (exercises the OCR gating without a camera). */}
-          <div className="mt-1 flex gap-2">
-            <input
-              value={ocrText}
-              onChange={(e) => setOcrText(e.target.value)}
-              placeholder="Simulate OCR text, e.g. 18.64 kg"
-              className="min-w-0 flex-1 rounded-lg bg-slate-900 px-2 py-2 font-mono text-xs text-slate-200 ring-1 ring-slate-600 focus:outline-none"
-            />
-            <button
-              type="button"
-              data-testid="dev-ocr-feed"
-              disabled={!ocrText.trim()}
-              onClick={() => onSimulateOcr(ocrText.trim(), 92)}
-              className="rounded-lg bg-indigo-500 px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
-            >
-              OCR
-            </button>
-            <button
-              type="button"
-              data-testid="dev-ocr-feed-low"
-              disabled={!ocrText.trim()}
-              onClick={() => onSimulateOcr(ocrText.trim(), 40)}
-              className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold text-slate-300 disabled:opacity-40"
-              title="Feed with low confidence"
-            >
-              low
             </button>
           </div>
         </div>
