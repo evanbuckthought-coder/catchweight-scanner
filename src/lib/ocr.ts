@@ -13,10 +13,31 @@
 
 import type { Worker as TesseractWorker } from 'tesseract.js';
 import type { ParsedCarton } from './gs1';
+import { STORAGE_KEYS, loadJSON, saveJSON } from './storage';
 import { toKg, type WeightUnit } from './units';
 
-/** Reads below this Tesseract confidence (0-100) are treated as failed. */
-export const OCR_MIN_CONFIDENCE = 70;
+/**
+ * Default confidence gate: reads below this Tesseract confidence (0-100) are
+ * rejected. Deliberately permissive — a single sharp tap-captured frame reads
+ * far better than the old continuous stream, and the hard safety net is the
+ * guardrails (1-40 kg range, missed-decimal, taught-format filter), not this
+ * gate. Tunable in Settings against real labels.
+ */
+export const DEFAULT_OCR_MIN_CONFIDENCE = 55;
+
+const OCR_CONFIDENCE_MIN = 20;
+const OCR_CONFIDENCE_MAX = 95;
+
+/** The tuned confidence gate (Settings), clamped; default when unset. */
+export function getOcrMinConfidence(): number {
+  const v = loadJSON<number>(STORAGE_KEYS.ocrMinConfidence, DEFAULT_OCR_MIN_CONFIDENCE);
+  if (!Number.isFinite(v)) return DEFAULT_OCR_MIN_CONFIDENCE;
+  return Math.min(OCR_CONFIDENCE_MAX, Math.max(OCR_CONFIDENCE_MIN, Math.round(v)));
+}
+
+export function setOcrMinConfidence(value: number): void {
+  saveJSON(STORAGE_KEYS.ocrMinConfidence, Math.min(OCR_CONFIDENCE_MAX, Math.max(OCR_CONFIDENCE_MIN, Math.round(value))));
+}
 
 /** OCR crop region as fractions of the camera frame. */
 export interface OcrRegion {
@@ -36,14 +57,25 @@ export interface OcrRegion {
 export const OCR_REGION: OcrRegion = { widthFrac: 0.72, heightFrac: 0.2, centerXFrac: 0.5, centerYFrac: 0.5 };
 
 /**
- * Derive a capture region from a taught profile's free-text weight region
- * (e.g. "bottom-right, inside the boxed grid"): the box shifts toward the
- * zone where this label prints its weight, so the operator naturally frames
- * the right part of the label. Unknown/absent text -> the centred default.
- * When both of a pair appear ("center-left, right of ..."), the first wins.
+ * Crop size once a label is taught: markedly TIGHTER than the default — the
+ * profile tells us the weight is one short printed line in a known zone, so
+ * OCR only processes that small region (fewer pixels, less surrounding
+ * clutter -> faster and more accurate reads).
  */
-export function regionFromProfile(weightRegion: string | null | undefined): OcrRegion {
-  const text = (weightRegion ?? '').toLowerCase();
+export const TAUGHT_REGION_SIZE = { widthFrac: 0.55, heightFrac: 0.15 };
+
+/**
+ * Derive the capture region from a taught profile: tight crop, positioned by
+ * the profile's free-text weight region (e.g. "bottom-right, inside the boxed
+ * grid") so the operator naturally frames the right part of the label. When
+ * both of a pair appear ("center-left, right of ..."), the first wins. No
+ * profile -> the larger centred default (test feeds / legacy callers).
+ */
+export function regionFromProfile(
+  map: { weightRegion: string | null } | null | undefined,
+): OcrRegion {
+  if (!map) return OCR_REGION;
+  const text = (map.weightRegion ?? '').toLowerCase();
   const first = (a: RegExp, b: RegExp): -1 | 0 | 1 => {
     const ia = text.search(a);
     const ib = text.search(b);
@@ -54,9 +86,9 @@ export function regionFromProfile(weightRegion: string | null | undefined): OcrR
   };
   const vert = first(/\b(top|upper)\b/, /\b(bottom|lower)\b/);
   const horiz = first(/\bleft\b/, /\bright\b/);
-  const { widthFrac, heightFrac } = OCR_REGION;
-  const cx = horiz === 0 ? 0.5 : horiz < 0 ? 0.38 : 0.62;
-  const cy = vert === 0 ? 0.5 : vert < 0 ? 0.28 : 0.72;
+  const { widthFrac, heightFrac } = TAUGHT_REGION_SIZE;
+  const cx = horiz === 0 ? 0.5 : horiz < 0 ? 0.35 : 0.65;
+  const cy = vert === 0 ? 0.5 : vert < 0 ? 0.25 : 0.75;
   return {
     widthFrac,
     heightFrac,

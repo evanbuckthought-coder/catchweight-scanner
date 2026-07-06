@@ -18,7 +18,7 @@ import {
 import { loadActiveSession, saveActiveSession, saveReceival } from './lib/persistence';
 import { weightWarnings } from './lib/guardrails';
 import {
-  OCR_MIN_CONFIDENCE,
+  getOcrMinConfidence,
   ocrToParsed,
   parseWeightTaught,
   regionFromProfile,
@@ -71,10 +71,6 @@ interface WeightPending {
 
 /** Ignore the identical decoded string while it stays in view (sliding window). */
 const REPEAT_WINDOW_MS = 3000;
-/** After a successful OCR capture, ignore reads while the user moves cartons. */
-const OCR_SUCCESS_COOLDOWN_MS = 2500;
-/** Min gap between low-confidence error tones (avoid machine-gun beeping). */
-const OCR_LOW_CONF_THROTTLE_MS = 2000;
 
 /** Append a carton to the active product's active pallet, lazily creating a new
  *  pallet (with the next fixed number) when there isn't one. Pure. */
@@ -188,9 +184,6 @@ export default function App() {
   const [labelsTeach, setLabelsTeach] = useState(false);
 
   const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
-  const ocrCooldownUntilRef = useRef(0);
-  const lastLowConfToneRef = useRef(0);
-  const lastRejectFeedbackRef = useRef(0);
   /**
    * True while any capture-interrupting sheet is open. Set synchronously when a
    * sheet opens so two decodes in the SAME camera frame can't both act (React
@@ -231,7 +224,8 @@ export default function App() {
     const prod = session.products.find((p) => p.id === session.activeProductId);
     return findProfileForCapture(prod?.gtin, session.supplier);
   }, [session, nav]);
-  const ocrRegion = useMemo(() => regionFromProfile(ocrProfile?.data?.weightRegion), [ocrProfile]);
+  // Taught profile present -> tight crop positioned at the taught zone.
+  const ocrRegion = useMemo(() => regionFromProfile(ocrProfile?.data), [ocrProfile]);
   const ocrHint = ocrProfile?.data ? taughtFormatHint(ocrProfile.data) : undefined;
 
   /**
@@ -314,7 +308,6 @@ export default function App() {
           : `${roundKg(ocr.kg).toFixed(2)} kg`;
       setOcrFeedback(`✓ ${msg}`);
       showToast(`Counted (OCR) · ${msg}`, 'info');
-      ocrCooldownUntilRef.current = Date.now() + OCR_SUCCESS_COOLDOWN_MS;
     },
     [scannedBy, showToast],
   );
@@ -401,37 +394,35 @@ export default function App() {
   );
 
   /**
-   * Single entry point for OCR reads (camera loop + test feed). Auto-accepts a
-   * read that passes every check; interrupts only when one fails.
+   * Single entry point for OCR reads (tap-to-capture + test feed). Each read
+   * is a deliberate user action now, so EVERY outcome gives feedback — the
+   * old continuous-loop throttles/cooldowns are gone. Auto-accepts a read
+   * that passes every check; interrupts only when one fails.
    */
   const handleOcrRead = useCallback(
     ({ text, confidence }: OcrRead) => {
       if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
-      if (Date.now() < ocrCooldownUntilRef.current) return;
 
       // Taught-profile-constrained parse: anchor-guided candidate selection,
       // and reads whose unit/decimals contradict the taught format are
       // rejected here (with visible feedback) instead of reaching the tally.
       const { w, rejected } = parseWeightTaught(text, ocrProfile?.data ?? undefined);
       if (rejected) {
-        const now = Date.now();
-        if (now - lastRejectFeedbackRef.current > OCR_LOW_CONF_THROTTLE_MS) {
-          lastRejectFeedbackRef.current = now;
-          setOcrFeedback(`Ignored: ${rejected}`);
-        }
+        signalError();
+        setOcrFeedback(`Ignored: ${rejected} — tap again`);
         return;
       }
-      // Not weight-shaped at all -> keep silently scanning.
-      if (!w) return;
+      if (!w) {
+        signalError();
+        setOcrFeedback('No weight read — line it up in the box and tap again');
+        return;
+      }
 
-      // Check 1: OCR confidence. A shaky read never auto-counts.
-      if (confidence < OCR_MIN_CONFIDENCE) {
-        const now = Date.now();
-        if (now - lastLowConfToneRef.current > OCR_LOW_CONF_THROTTLE_MS) {
-          lastLowConfToneRef.current = now;
-          signalError();
-          setOcrFeedback('Low confidence — hold steady and re-point');
-        }
+      // Check 1: OCR confidence (tunable in Settings). A shaky read never
+      // auto-counts.
+      if (confidence < getOcrMinConfidence()) {
+        signalError();
+        setOcrFeedback(`Low confidence (${Math.round(confidence)}%) — hold steady and tap again`);
         return;
       }
 
@@ -562,7 +553,6 @@ export default function App() {
       }
       signalSuccess();
       showToast(`Counted ${productName} · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
-      if (entry === 'ocr') ocrCooldownUntilRef.current = Date.now() + OCR_SUCCESS_COOLDOWN_MS;
       setPending(null);
     },
     [pending, scannedBy, showToast],

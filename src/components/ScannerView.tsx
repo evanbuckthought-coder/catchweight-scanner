@@ -124,40 +124,29 @@ export function ScannerView({
     return stop;
   }, [mode, status, paused, active, onDecode]);
 
-  // OCR capture loop: recognitions run back-to-back with a short breather
-  // (Tesseract takes a few hundred ms per frame; a busy-wait guard is implicit
-  // in the sequential await).
-  useEffect(() => {
-    if (mode !== 'ocr' || status !== 'ready' || ocr.status !== 'ready' || paused || !active) return;
+  // TAP-TO-CAPTURE OCR: one recognition of the current frame per explicit
+  // tap. Replaced the old continuous loop, which churned on blurry/moving
+  // frames and was slower per carton than typing — a single deliberately
+  // lined-up still is both faster and more accurate.
+  const [reading, setReading] = useState(false);
+  const ocrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const captureOnce = async () => {
+    if (reading || paused || status !== 'ready' || ocr.status !== 'ready') return;
     const video = videoRef.current;
     if (!video) return;
-    let stopped = false;
-    const canvas = document.createElement('canvas');
-    let consecutiveErrors = 0;
-    (async () => {
-      while (!stopped) {
-        try {
-          const read = await recognizeVideoRegion(video, canvas, ocrRegion ?? OCR_REGION);
-          consecutiveErrors = 0;
-          if (stopped) break;
-          if (read && read.text) onOcrRead(read);
-        } catch (err) {
-          console.warn('OCR tick failed:', err);
-          // A dead worker would otherwise spin (and burn battery) forever;
-          // after repeated failures surface the error state with its Retry.
-          consecutiveErrors += 1;
-          if (consecutiveErrors >= 5) {
-            if (!stopped) ocr.fail('recognition kept failing — retry');
-            break;
-          }
-        }
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    })();
-    return () => {
-      stopped = true;
-    };
-  }, [mode, status, ocr.status, ocr.fail, paused, active, onOcrRead, ocrRegion]);
+    ocrCanvasRef.current ??= document.createElement('canvas');
+    setReading(true);
+    try {
+      const read = await recognizeVideoRegion(video, ocrCanvasRef.current, ocrRegion ?? OCR_REGION);
+      // Empty reads flow through too — the handler owns per-tap feedback.
+      onOcrRead(read ?? { text: '', confidence: 0 });
+    } catch (err) {
+      console.warn('OCR capture failed:', err);
+      ocr.fail('recognition failed — retry');
+    } finally {
+      setReading(false);
+    }
+  };
 
   return (
     <div
@@ -199,13 +188,13 @@ export function ScannerView({
                   </span>
                 )}
                 <span className="max-w-full truncate rounded-full bg-slate-900/70 px-3 py-1 text-xs font-medium text-sky-200">
-                  {ocrHint ? `Expecting ${ocrHint}` : 'Align the printed weight in the box'}
+                  {ocrHint ? `Expecting ${ocrHint}` : 'Line the printed weight up in the box'}
                 </span>
               </div>
               <div
                 data-testid="ocr-box"
                 className={`absolute rounded-lg border-2 ${
-                  paused ? 'border-amber-400/70' : 'border-sky-400/90'
+                  paused ? 'border-amber-400/70' : reading ? 'border-emerald-400' : 'border-sky-400/90'
                 }`}
                 style={{
                   left: `${(region.centerXFrac - boxW / 2) * 100}%`,
@@ -214,7 +203,7 @@ export function ScannerView({
                   height: `${boxH * 100}%`,
                 }}
               />
-              <div className="absolute inset-x-0 bottom-8 flex flex-col items-center gap-1 px-2">
+              <div className="absolute inset-x-0 bottom-16 flex flex-col items-center gap-1 px-2">
                 {ocrFeedback && (
                   <span className="max-w-[90%] truncate rounded-full bg-slate-900/80 px-3 py-1 text-sm font-semibold text-emerald-300">
                     {ocrFeedback}
@@ -226,6 +215,19 @@ export function ScannerView({
                   </span>
                 )}
               </div>
+              {ocr.status === 'ready' && !paused && (
+                <div className="absolute inset-x-0 bottom-3 flex justify-center">
+                  <button
+                    type="button"
+                    data-testid="ocr-capture"
+                    disabled={reading}
+                    onClick={() => void captureOnce()}
+                    className="pointer-events-auto rounded-full bg-emerald-500 px-8 py-3 text-base font-bold text-slate-900 shadow-lg shadow-black/40 active:bg-emerald-400 disabled:opacity-70"
+                  >
+                    {reading ? '🔍 Reading…' : '📸 Capture weight'}
+                  </button>
+                </div>
+              )}
             </div>
           );
         })()}

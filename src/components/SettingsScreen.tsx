@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { runOcrDiagnostics, type OcrDiagStep } from '../lib/ocr';
+import {
+  DEFAULT_OCR_MIN_CONFIDENCE,
+  getOcrMinConfidence,
+  runOcrDiagnostics,
+  setOcrMinConfidence,
+  type OcrDiagStep,
+} from '../lib/ocr';
 import { UNLOCK_FLAG_KEY } from '../lib/auth';
 
 /**
@@ -43,6 +49,7 @@ export function SettingsScreen({
   const [confirmLock, setConfirmLock] = useState(false);
   const [diagSteps, setDiagSteps] = useState<OcrDiagStep[] | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
+  const [ocrConf, setOcrConf] = useState(() => getOcrMinConfidence());
 
   const runDiagnostics = async () => {
     if (diagRunning) return;
@@ -160,6 +167,41 @@ export function SettingsScreen({
           />
         </button>
       </label>
+
+      {/* OCR confidence gate: tunable against real labels. Lowering it only
+          accepts reads FASTER — the range/decimal/taught-format guardrails
+          still run on every read regardless. */}
+      <div className="rounded-xl bg-slate-800/60 p-3 ring-1 ring-slate-700">
+        <div className="flex items-center justify-between text-sm font-medium text-slate-300">
+          <span>OCR confidence gate</span>
+          <span className="font-bold text-slate-100">
+            {ocrConf}%
+            {ocrConf !== DEFAULT_OCR_MIN_CONFIDENCE && (
+              <span className="ml-1 text-xs font-normal text-slate-500">
+                (default {DEFAULT_OCR_MIN_CONFIDENCE})
+              </span>
+            )}
+          </span>
+        </div>
+        <input
+          data-testid="ocr-confidence"
+          type="range"
+          min={30}
+          max={90}
+          step={5}
+          value={ocrConf}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            setOcrConf(v);
+            setOcrMinConfidence(v);
+          }}
+          className="mt-2 w-full accent-emerald-500"
+        />
+        <p className="mt-1 text-xs text-slate-500">
+          Captures reading below this are rejected with “tap again”. Lower = accepts reads faster;
+          the 1–40 kg, decimal and taught-format guardrails still apply to every read.
+        </p>
+      </div>
 
       {/* On-device OCR self-test: pinpoints which stage of the engine load
           fails on THIS device (iOS-PWA failures are invisible from desktop). */}

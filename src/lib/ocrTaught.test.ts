@@ -1,38 +1,76 @@
-import { describe, it, expect } from 'vitest';
-import { OCR_REGION, parseWeightTaught, regionFromProfile } from './ocr';
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  DEFAULT_OCR_MIN_CONFIDENCE,
+  getOcrMinConfidence,
+  setOcrMinConfidence,
+  OCR_REGION,
+  TAUGHT_REGION_SIZE,
+  parseWeightTaught,
+  regionFromProfile,
+} from './ocr';
+
+const region = (weightRegion: string | null) => ({ weightRegion });
 
 describe('regionFromProfile', () => {
-  it('defaults to the centred region when nothing is taught', () => {
+  it('falls back to the larger centred default with no profile', () => {
     expect(regionFromProfile(undefined)).toEqual(OCR_REGION);
     expect(regionFromProfile(null)).toEqual(OCR_REGION);
-    expect(regionFromProfile('somewhere on the label')).toEqual(OCR_REGION);
+  });
+
+  it('tightens the crop whenever a label is taught — even without a zone', () => {
+    for (const r of [regionFromProfile(region(null)), regionFromProfile(region('bottom right'))]) {
+      expect(r.widthFrac).toBe(TAUGHT_REGION_SIZE.widthFrac);
+      expect(r.heightFrac).toBe(TAUGHT_REGION_SIZE.heightFrac);
+      expect(r.widthFrac).toBeLessThan(OCR_REGION.widthFrac);
+      expect(r.heightFrac).toBeLessThan(OCR_REGION.heightFrac);
+    }
   });
 
   it('shifts toward the taught zone', () => {
-    const br = regionFromProfile('bottom-right, inside the boxed grid');
+    const br = regionFromProfile(region('bottom-right, inside the boxed grid'));
     expect(br.centerYFrac).toBeGreaterThan(0.5);
     expect(br.centerXFrac).toBeGreaterThan(0.5);
 
-    const tl = regionFromProfile('top left corner');
+    const tl = regionFromProfile(region('top left corner'));
     expect(tl.centerYFrac).toBeLessThan(0.5);
     expect(tl.centerXFrac).toBeLessThan(0.5);
   });
 
   it('when both of a pair appear, the first mentioned wins', () => {
     // real AI output: "center-left, right of the anchor labels stack"
-    const r = regionFromProfile('center-left, right of the anchor labels stack');
+    const r = regionFromProfile(region('center-left, right of the anchor labels stack'));
     expect(r.centerXFrac).toBeLessThan(0.5);
     expect(r.centerYFrac).toBe(0.5);
   });
 
   it('keeps the crop inside the frame', () => {
-    for (const text of ['top left', 'bottom right', undefined]) {
-      const r = regionFromProfile(text);
+    for (const map of [region('top left'), region('bottom right'), undefined]) {
+      const r = regionFromProfile(map);
       expect(r.centerXFrac - r.widthFrac / 2).toBeGreaterThanOrEqual(0);
       expect(r.centerXFrac + r.widthFrac / 2).toBeLessThanOrEqual(1);
       expect(r.centerYFrac - r.heightFrac / 2).toBeGreaterThanOrEqual(0);
       expect(r.centerYFrac + r.heightFrac / 2).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+describe('OCR confidence gate setting', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('defaults, persists, and clamps', () => {
+    expect(getOcrMinConfidence()).toBe(DEFAULT_OCR_MIN_CONFIDENCE);
+    setOcrMinConfidence(40);
+    expect(getOcrMinConfidence()).toBe(40);
+    setOcrMinConfidence(5); // below the floor
+    expect(getOcrMinConfidence()).toBe(20);
+    setOcrMinConfidence(200); // above the ceiling
+    expect(getOcrMinConfidence()).toBe(95);
+  });
+
+  it('ignores garbage in storage', () => {
+    localStorage.setItem('cw.ocrMinConfidence', '"not a number"');
+    expect(getOcrMinConfidence()).toBe(DEFAULT_OCR_MIN_CONFIDENCE);
   });
 });
 
