@@ -112,10 +112,11 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
   };
 
   for (const product of session.products) {
+    const noBarcode = product.startedManually && !product.gtin;
     banner(
       `PRODUCT: ${product.product}    |    Supplier: ${session.supplier}${
         session.brand ? `    |    Brand: ${session.brand}` : ''
-      }`,
+      }${noBarcode ? `    |    STARTED MANUALLY — NO BARCODE${product.cartonId ? ` (carton ${product.cartonId})` : ''}` : ''}`,
     );
 
     for (const pallet of product.pallets) {
@@ -156,7 +157,9 @@ function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
   ];
   for (const product of session.products) {
     const prodCartons = productCartons(product);
-    aoa.push([product.product, prodCartons.length, sumRoundedKg(prodCartons), '']);
+    const label =
+      product.startedManually && !product.gtin ? `${product.product} (no barcode)` : product.product;
+    aoa.push([label, prodCartons.length, sumRoundedKg(prodCartons), '']);
     for (const pallet of product.pallets as SessionProduct['pallets']) {
       aoa.push([`    Pallet ${pallet.number}`, pallet.cartons.length, sumRoundedKg(pallet.cartons), pallet.palletId ?? '']);
     }

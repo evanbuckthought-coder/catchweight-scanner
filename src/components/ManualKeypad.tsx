@@ -4,8 +4,8 @@ import { weightWarnings } from '../lib/guardrails';
 import { roundKg, toKg, type WeightUnit } from '../lib/units';
 
 interface ManualKeypadProps {
-  /** Product being captured; null disables the pad (a product must exist first). */
-  productName: string | null;
+  /** Active product the keypad counts into (guaranteed by the caller). */
+  productName: string;
   /** Batch inherited onto each manual carton (shown for transparency). */
   lastBatch?: string;
   /** Persisted unit — kg by default, set once for lb suppliers. */
@@ -56,18 +56,6 @@ export function ManualKeypad({ productName, lastBatch, unit, onUnitChange, onCom
     }
     commit(num);
   };
-
-  if (!productName) {
-    return (
-      <div className="flex aspect-[3/4] w-full flex-col items-center justify-center gap-3 rounded-2xl bg-slate-900 p-6 text-center ring-1 ring-slate-700">
-        <span className="text-4xl">✎</span>
-        <p className="text-sm text-slate-400">
-          Manual entry needs a product first — switch to Barcode and scan the first carton (the
-          first-carton confirm sets the product this pad counts into).
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div className="flex w-full flex-col gap-2 rounded-2xl bg-slate-900 p-3 ring-1 ring-slate-700">

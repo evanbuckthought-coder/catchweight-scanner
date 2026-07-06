@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CartonRecord, GtinProfile, Session } from './types';
 import { parseGS1, type ParsedCarton } from './lib/gs1';
 import { rememberSupplier } from './lib/suppliers';
+import { rememberProduct } from './lib/products';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
 import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, removeProfile, upsertProfile } from './lib/profiles';
@@ -39,6 +40,7 @@ import { ConfirmSheet, type PendingConfirm } from './components/ConfirmSheet';
 import { LabelChangeSheet } from './components/LabelChangeSheet';
 import { WeightConfirmSheet } from './components/WeightConfirmSheet';
 import { ManualKeypad } from './components/ManualKeypad';
+import { ManualProductStart } from './components/ManualProductStart';
 
 type ToastKind = 'info' | 'warn' | 'error';
 interface Toast {
@@ -283,6 +285,40 @@ export default function App() {
         return;
       }
 
+      // Merge: a manually-started product has no barcode yet. Its first scanned
+      // carton ADOPTS the GTIN/fingerprint onto the product (no duplicate, no
+      // spurious label-change warning) and counts, then future scans recognise
+      // it. The 'started manually' flag stays for provenance.
+      if (active.startedManually && active.gtin === '' && gtin) {
+        setSessionState((prev) =>
+          prev
+            ? {
+                ...prev,
+                products: prev.products.map((p) =>
+                  p.id === active.id ? { ...p, gtin, fingerprint: parsed.fingerprint ?? '' } : p,
+                ),
+              }
+            : prev,
+        );
+        setProfiles(
+          upsertProfile({
+            gtin,
+            productName: active.product,
+            supplierName: session.supplier,
+            fingerprint: parsed.fingerprint ?? '',
+            updatedAt: new Date().toISOString(),
+          }),
+        );
+        showToast(`Barcode linked to ${active.product}`, 'info');
+        if (warnings.length) {
+          sheetGateRef.current = true;
+          setWeightPending({ parsed, warnings, productName: active.product });
+          return;
+        }
+        commitScanned(parsed);
+        return;
+      }
+
       // Label differs from the current product -> warn.
       if (parsed.gtin !== active.gtin || parsed.fingerprint !== active.fingerprint) {
         sheetGateRef.current = true;
@@ -371,11 +407,53 @@ export default function App() {
           }),
         );
       }
+      rememberProduct(sessionRef.current?.supplier ?? '', productName);
       signalSuccess();
       showToast(`Counted ${productName} · ${roundKg(parsed.weightKg ?? 0).toFixed(2)} kg`, 'info');
       setPending(null);
     },
     [pending, scannedBy, showToast],
+  );
+
+  /**
+   * Start a product BY HAND — the manual equivalent of the first-carton
+   * confirm, for a first carton whose barcode won't scan. Creates an empty
+   * product (no barcode) that the keypad then counts cartons into; a later
+   * scanned carton of the same product adopts the barcode (see handleDecode).
+   */
+  const startProductManually = useCallback(
+    (productName: string, batch: string | undefined, cartonId: string | undefined) => {
+      const name = productName.trim();
+      if (!name) return;
+      const productId = uid();
+      setSessionState((prev) =>
+        prev
+          ? {
+              ...prev,
+              products: [
+                ...prev.products,
+                {
+                  id: productId,
+                  product: name,
+                  gtin: '',
+                  fingerprint: 'manual',
+                  startedAt: new Date().toISOString(),
+                  startedManually: true,
+                  batch: batch?.trim() || undefined,
+                  cartonId: cartonId?.trim() || undefined,
+                  pallets: [],
+                },
+              ],
+              activeProductId: productId,
+              activePalletId: null,
+            }
+          : prev,
+      );
+      rememberProduct(sessionRef.current?.supplier ?? '', name);
+      signalSuccess();
+      showToast(`Started ${name} (manual — no barcode)`, 'info');
+    },
+    [showToast],
   );
 
   // --- label-change resolutions ---------------------------------------------
@@ -733,7 +811,11 @@ export default function App() {
     : activeProduct
       ? nextPalletNumber(activeProduct)
       : 1;
-  const lastBatch = activeProduct ? productCartons(activeProduct).at(-1)?.batch : undefined;
+  // Manual cartons inherit the last carton's batch, falling back to the batch
+  // set at a manual product start (so an empty manual product still seeds it).
+  const lastBatch = activeProduct
+    ? (productCartons(activeProduct).at(-1)?.batch ?? activeProduct.batch)
+    : undefined;
   const canNewPallet = !!activeProduct && !!activePallet && activePallet.cartons.length > 0;
 
   return (
@@ -776,13 +858,19 @@ export default function App() {
           onDecode={handleDecode}
           onOcrRead={() => {}}
         />
-      ) : (
+      ) : activeProduct ? (
         <ManualKeypad
-          productName={activeProduct?.product ?? null}
+          productName={activeProduct.product}
           lastBatch={lastBatch}
           unit={manualUnit}
           onUnitChange={setManualUnit}
           onCommit={(netWeight, unit) => addManualCarton({ netWeight, unit, batch: lastBatch })}
+        />
+      ) : (
+        <ManualProductStart
+          supplier={session.supplier}
+          sessionProducts={session.products.map((p) => p.product)}
+          onStart={startProductManually}
         />
       )}
 
@@ -867,10 +955,14 @@ export default function App() {
       ) : (
         <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
           {!activeProduct
-            ? session.products.length === 0
-              ? 'Scan the first carton to start the first product.'
-              : 'Scan the first carton of the next product, or tap Review to finish.'
-            : `Scan the first carton of Pallet ${palletNumber}.`}
+            ? mode === 'manual'
+              ? 'Name the product above to start it by hand, then key in cartons.'
+              : session.products.length === 0
+                ? 'Scan the first carton to start the first product — or switch to Manual entry if the barcode won’t scan.'
+                : 'Scan the first carton of the next product, or tap Review to finish.'
+            : mode === 'manual'
+              ? `Key in the first carton of Pallet ${palletNumber} and tap ENTER.`
+              : `Scan the first carton of Pallet ${palletNumber}.`}
         </div>
       )}
 

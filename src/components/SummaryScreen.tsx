@@ -67,12 +67,24 @@ export function SummaryScreen({
                   className="flex w-full items-center gap-3 px-3 py-2.5 text-left active:bg-slate-700/40"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-semibold text-slate-100">
-                      {p.product || '(unnamed)'}
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-semibold text-slate-100">
+                        {p.product || '(unnamed)'}
+                      </span>
+                      {p.startedManually && !p.gtin && (
+                        <span className="shrink-0 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-300 ring-1 ring-amber-500/40">
+                          No barcode
+                        </span>
+                      )}
                     </div>
                     <div className="truncate text-xs text-slate-400">
                       {sub.count} carton{sub.count === 1 ? '' : 's'} · {p.pallets.length} pallet
-                      {p.pallets.length === 1 ? '' : 's'} · GTIN {p.gtin || '—'}
+                      {p.pallets.length === 1 ? '' : 's'} ·{' '}
+                      {p.gtin
+                        ? `GTIN ${p.gtin}`
+                        : p.startedManually
+                          ? `started manually${p.cartonId ? ` · carton ${p.cartonId}` : ''}`
+                          : 'GTIN —'}
                     </div>
                   </div>
                   <span className="shrink-0 font-mono font-bold tabular-nums text-emerald-400">

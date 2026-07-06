@@ -79,15 +79,29 @@ export interface Pallet {
 /** A product group within a PO session. */
 export interface SessionProduct {
   id: string;
-  /** Confirmed product name (from the first-carton confirm). */
+  /** Confirmed product name (from the first-carton confirm, or a manual start). */
   product: string;
-  /** GTIN that defines this product group (from its first carton). */
+  /** GTIN that defines this product group. Empty until a barcode is scanned —
+   *  a manually-started product may keep '' if no carton ever scans. */
   gtin: string;
   /** Fingerprint that defines this product group (label-change baseline). */
   fingerprint: string;
   startedAt: string;
   /** Pallets under this product, in order; pallet number = index + 1. */
   pallets: Pallet[];
+  /**
+   * True when the product was established via manual entry (its first carton
+   * had no readable barcode). Combined with an empty `gtin`, means no barcode
+   * was ever scanned for it — surfaced in review/export. Cleared implicitly
+   * for reporting once a barcode is later adopted (gtin becomes non-empty).
+   */
+  startedManually?: boolean;
+  /** Default batch/lot set at a manual start; seeds manual cartons until one
+   *  carries its own batch. */
+  batch?: string;
+  /** Carton/label identifier read off the label by eye at a manual start
+   *  (informational — shown in review/export). */
+  cartonId?: string;
 }
 
 /** Saved per-GTIN profile so later scans auto-fill the product name. */
