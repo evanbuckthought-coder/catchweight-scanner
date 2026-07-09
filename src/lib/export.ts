@@ -112,11 +112,17 @@ function buildCartonsSheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
   };
 
   for (const product of session.products) {
-    const noBarcode = product.startedManually && !product.gtin;
+    const flags = [
+      product.startedManually && !product.gtin ? 'NO BARCODE' : null,
+      product.productionDateUnavailable ? 'NO PRODUCTION DATE' : null,
+    ].filter(Boolean);
+    const note = flags.length
+      ? `    |    ${product.startedManually ? 'STARTED MANUALLY — ' : ''}${flags.join(' · ')}`
+      : '';
     banner(
       `PRODUCT: ${product.product}    |    Supplier: ${session.supplier}${
         session.brand ? `    |    Brand: ${session.brand}` : ''
-      }${noBarcode ? `    |    STARTED MANUALLY — NO BARCODE${product.cartonId ? ` (carton ${product.cartonId})` : ''}` : ''}`,
+      }${note}`,
     );
 
     for (const pallet of product.pallets) {
@@ -157,8 +163,11 @@ function buildSummarySheet(XLSX: XLSXModule, session: Session): XLSXType.WorkShe
   ];
   for (const product of session.products) {
     const prodCartons = productCartons(product);
-    const label =
-      product.startedManually && !product.gtin ? `${product.product} (no barcode)` : product.product;
+    const notes = [
+      product.startedManually && !product.gtin ? 'no barcode' : null,
+      product.productionDateUnavailable ? 'no production date' : null,
+    ].filter(Boolean);
+    const label = notes.length ? `${product.product} (${notes.join(', ')})` : product.product;
     aoa.push([label, prodCartons.length, sumRoundedKg(prodCartons), '']);
     for (const pallet of product.pallets as SessionProduct['pallets']) {
       aoa.push([`    Pallet ${pallet.number}`, pallet.cartons.length, sumRoundedKg(pallet.cartons), pallet.palletId ?? '']);

@@ -57,9 +57,13 @@ export interface ManualEntryInput {
   batch?: string;
 }
 
-/** Manual-entry context = scan context + the inherited GTIN of the product. */
+/** Manual-entry context = scan context + the inherited GTIN and dates of the product. */
 export interface ManualCartonContext extends CartonContext {
   gtin: string;
+  /** Production date inherited from the manual product start (ISO YYYY-MM-DD). */
+  productionDate?: string;
+  /** Best-before inherited from the manual product start (ISO YYYY-MM-DD). */
+  bestBefore?: string;
 }
 
 /** Build a record from a manual keyed entry (flagged manual: true). */
@@ -84,9 +88,9 @@ export function toManualCartonRecord(
     serial: undefined,
     traceId: batch,
     traceAI: batch ? '10' : undefined,
-    productionDate: undefined,
+    productionDate: ctx.productionDate,
     packagingDate: undefined,
-    bestBefore: undefined,
+    bestBefore: ctx.bestBefore,
     useBy: undefined,
     raw: '',
     fingerprint: ctx.gtin ? `manual|${batch ? '10' : '?'}|${ctx.gtin.slice(0, 7)}` : 'manual',

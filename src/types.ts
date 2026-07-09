@@ -102,6 +102,23 @@ export interface SessionProduct {
   /** Carton/label identifier read off the label by eye at a manual start
    *  (informational — shown in review/export). */
   cartonId?: string;
+  /**
+   * Production date (ISO YYYY-MM-DD) captured at a manual start; inherited by
+   * this product's manual cartons. The WMS/date management depends on it, so
+   * it's strongly prompted for — see productionDateUnavailable.
+   *
+   * NB: kept as its own field, separate from bestBefore, so a later
+   * "production date + per-product shelf-life = best before" rule can derive
+   * the expiry from it without any rework. No shelf-life logic exists yet.
+   */
+  productionDate?: string;
+  /** Best-before / expiry (ISO YYYY-MM-DD), optional; entered if known. Could
+   *  later be auto-derived from productionDate + a shelf-life rule. */
+  bestBefore?: string;
+  /** Set only when the operator explicitly chose "No date available" at a
+   *  manual start — distinguishes a deliberate no-date from "not captured", and
+   *  is surfaced in review/export. */
+  productionDateUnavailable?: boolean;
 }
 
 /** Saved per-GTIN profile so later scans auto-fill the product name. */

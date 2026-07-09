@@ -40,7 +40,7 @@ import { ConfirmSheet, type PendingConfirm } from './components/ConfirmSheet';
 import { LabelChangeSheet } from './components/LabelChangeSheet';
 import { WeightConfirmSheet } from './components/WeightConfirmSheet';
 import { ManualKeypad } from './components/ManualKeypad';
-import { ManualProductStart } from './components/ManualProductStart';
+import { ManualProductStart, type ManualProductInit } from './components/ManualProductStart';
 
 type ToastKind = 'info' | 'warn' | 'error';
 interface Toast {
@@ -420,9 +420,11 @@ export default function App() {
    * confirm, for a first carton whose barcode won't scan. Creates an empty
    * product (no barcode) that the keypad then counts cartons into; a later
    * scanned carton of the same product adopts the barcode (see handleDecode).
+   * Production date / best-before are captured here and inherited by every
+   * manual carton of this product.
    */
   const startProductManually = useCallback(
-    (productName: string, batch: string | undefined, cartonId: string | undefined) => {
+    (productName: string, init: ManualProductInit) => {
       const name = productName.trim();
       if (!name) return;
       const productId = uid();
@@ -439,8 +441,9 @@ export default function App() {
                   fingerprint: 'manual',
                   startedAt: new Date().toISOString(),
                   startedManually: true,
-                  batch: batch?.trim() || undefined,
-                  cartonId: cartonId?.trim() || undefined,
+                  productionDate: init.productionDate,
+                  bestBefore: init.bestBefore,
+                  productionDateUnavailable: init.productionDateUnavailable || undefined,
                   pallets: [],
                 },
               ],
@@ -451,7 +454,10 @@ export default function App() {
       );
       rememberProduct(sessionRef.current?.supplier ?? '', name);
       signalSuccess();
-      showToast(`Started ${name} (manual — no barcode)`, 'info');
+      showToast(
+        `Started ${name} (manual${init.productionDateUnavailable ? ', no production date' : ''})`,
+        'info',
+      );
     },
     [showToast],
   );
@@ -536,6 +542,8 @@ export default function App() {
           brand: prev.brand,
           product: activeNow.product,
           gtin: activeNow.gtin,
+          productionDate: activeNow.productionDate,
+          bestBefore: activeNow.bestBefore,
         });
         return withCartonAppended(prev, record);
       });

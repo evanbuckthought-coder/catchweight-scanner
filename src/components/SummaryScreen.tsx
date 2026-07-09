@@ -67,7 +67,7 @@ export function SummaryScreen({
                   className="flex w-full items-center gap-3 px-3 py-2.5 text-left active:bg-slate-700/40"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="truncate font-semibold text-slate-100">
                         {p.product || '(unnamed)'}
                       </span>
@@ -76,15 +76,18 @@ export function SummaryScreen({
                           No barcode
                         </span>
                       )}
+                      {p.productionDateUnavailable && (
+                        <span className="shrink-0 rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-rose-300 ring-1 ring-rose-500/40">
+                          No prod date
+                        </span>
+                      )}
                     </div>
                     <div className="truncate text-xs text-slate-400">
                       {sub.count} carton{sub.count === 1 ? '' : 's'} · {p.pallets.length} pallet
                       {p.pallets.length === 1 ? '' : 's'} ·{' '}
-                      {p.gtin
-                        ? `GTIN ${p.gtin}`
-                        : p.startedManually
-                          ? `started manually${p.cartonId ? ` · carton ${p.cartonId}` : ''}`
-                          : 'GTIN —'}
+                      {p.gtin ? `GTIN ${p.gtin}` : p.startedManually ? 'started manually' : 'GTIN —'}
+                      {p.productionDate ? ` · prod ${p.productionDate}` : ''}
+                      {p.bestBefore ? ` · BB ${p.bestBefore}` : ''}
                     </div>
                   </div>
                   <span className="shrink-0 font-mono font-bold tabular-nums text-emerald-400">
