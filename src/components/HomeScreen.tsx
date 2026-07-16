@@ -4,8 +4,11 @@ import { poTotals } from '../lib/session';
 interface HomeScreenProps {
   /** In-progress session, if one exists on this device. */
   activeSession: Session | null;
+  /** Items in an in-progress Quick Count (0 = none). */
+  quickCountActive: number;
   onNewReceival: () => void;
   onResume: () => void;
+  onQuickCount: () => void;
   onHistory: () => void;
   onLabels: () => void;
   onSettings: () => void;
@@ -19,8 +22,10 @@ interface HomeScreenProps {
  */
 export function HomeScreen({
   activeSession,
+  quickCountActive,
   onNewReceival,
   onResume,
+  onQuickCount,
   onHistory,
   onLabels,
   onSettings,
@@ -71,6 +76,27 @@ export function HomeScreen({
           </div>
         </button>
       )}
+
+      {/* Quick Count — a scratchpad weight tally, deliberately styled apart
+          from the emerald "New receival" so the two are never confused. */}
+      <button
+        type="button"
+        data-testid="home-quick-count"
+        onClick={onQuickCount}
+        className="mt-2 flex items-center justify-between gap-3 rounded-2xl border-2 border-dashed border-amber-500/60 bg-amber-500/10 px-4 py-4 text-left active:bg-amber-500/20"
+      >
+        <div className="min-w-0">
+          <div className="text-lg font-bold text-amber-200">⚡ Quick Count</div>
+          <div className="mt-0.5 text-xs text-amber-200/70">
+            Just add up weights — no PO, supplier or product. Not a receival.
+          </div>
+        </div>
+        {quickCountActive > 0 && (
+          <span className="shrink-0 rounded-full bg-amber-500/30 px-2.5 py-1 text-xs font-bold text-amber-100 ring-1 ring-amber-500/50">
+            {quickCountActive} in progress
+          </span>
+        )}
+      </button>
 
       <div className="mt-2 flex flex-col gap-3">
         <button

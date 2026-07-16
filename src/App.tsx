@@ -41,6 +41,13 @@ import { LabelChangeSheet } from './components/LabelChangeSheet';
 import { WeightConfirmSheet } from './components/WeightConfirmSheet';
 import { ManualKeypad } from './components/ManualKeypad';
 import { ManualProductStart, type ManualProductInit } from './components/ManualProductStart';
+import { QuickCountScreen } from './components/QuickCountScreen';
+import { QuickCountsListScreen } from './components/QuickCountsListScreen';
+import {
+  loadSavedQuickCounts,
+  saveQuickCount,
+  type QuickCountEntry,
+} from './lib/quickCount';
 
 type ToastKind = 'info' | 'warn' | 'error';
 interface Toast {
@@ -154,7 +161,15 @@ export default function App() {
    *  receiving flow; 'resume-guard' protects an unfinished session when the
    *  user taps New receival while one exists. */
   const [nav, setNav] = useState<
-    'home' | 'resume-guard' | 'session-setup' | 'capture' | 'history' | 'labels' | 'settings'
+    | 'home'
+    | 'resume-guard'
+    | 'session-setup'
+    | 'capture'
+    | 'history'
+    | 'labels'
+    | 'settings'
+    | 'quick-count'
+    | 'quick-counts'
   >('home');
   const [view, setView] = useState<'scan' | 'summary'>('scan');
   /** Capture mode: barcode camera, or the manual-entry keypad (primary modes).
@@ -168,6 +183,14 @@ export default function App() {
   const [toast, setToast] = useState<Toast | null>(null);
   /** Manual-keypad unit — kg default, persisted so lb suppliers set it once. */
   const [manualUnit, setManualUnit] = useLocalStorage<WeightUnit>(STORAGE_KEYS.manualUnit, 'kg');
+  /** Quick Count — an in-progress flat weight tally (persists across reloads),
+   *  its own keypad unit, and a count of saved scratchpad counts (badge). */
+  const [quickEntries, setQuickEntries] = useLocalStorage<QuickCountEntry[]>(
+    STORAGE_KEYS.quickCountActive,
+    [],
+  );
+  const [quickUnit, setQuickUnit] = useLocalStorage<WeightUnit>(STORAGE_KEYS.quickCountUnit, 'kg');
+  const [quickSavedCount, setQuickSavedCount] = useState(() => loadSavedQuickCounts().length);
 
   const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
   /**
@@ -639,6 +662,30 @@ export default function App() {
     setProfiles(upsertProfile(profile));
   }, []);
 
+  // --- Quick Count (weight-only tally, separate from receivals) --------------
+
+  const quickAdd = useCallback(
+    (entry: QuickCountEntry) => setQuickEntries((prev) => [...prev, entry]),
+    [setQuickEntries],
+  );
+  const quickRemove = useCallback(
+    (id: string) => setQuickEntries((prev) => prev.filter((e) => e.id !== id)),
+    [setQuickEntries],
+  );
+  const quickClear = useCallback(() => setQuickEntries([]), [setQuickEntries]);
+  const quickDiscard = useCallback(() => {
+    setQuickEntries([]);
+    setNav('home');
+  }, [setQuickEntries]);
+  const quickSave = useCallback(() => {
+    if (quickEntries.length === 0) return;
+    saveQuickCount(quickEntries, scannedBy);
+    setQuickEntries([]);
+    setQuickSavedCount(loadSavedQuickCounts().length);
+    setNav('home');
+    showToast('Quick count saved on device', 'info');
+  }, [quickEntries, scannedBy, setQuickEntries, showToast]);
+
   const handleExport = useCallback(async () => {
     const cur = sessionRef.current;
     if (!cur || allCartons(cur).length === 0) {
@@ -736,6 +783,36 @@ export default function App() {
     );
   }
 
+  if (nav === 'quick-count') {
+    return (
+      <QuickCountScreen
+        scannedBy={scannedBy}
+        entries={quickEntries}
+        unit={quickUnit}
+        onUnitChange={setQuickUnit}
+        onAdd={quickAdd}
+        onRemove={quickRemove}
+        onClear={quickClear}
+        onDiscard={quickDiscard}
+        onSave={quickSave}
+        onExit={() => setNav('home')}
+        onViewSaved={() => setNav('quick-counts')}
+        savedCount={quickSavedCount}
+      />
+    );
+  }
+
+  if (nav === 'quick-counts') {
+    return (
+      <QuickCountsListScreen
+        onBack={() => {
+          setQuickSavedCount(loadSavedQuickCounts().length);
+          setNav('quick-count');
+        }}
+      />
+    );
+  }
+
   // New receival tapped while an unfinished session exists: never silently
   // clobber it — the operator explicitly resumes or discards first.
   if (nav === 'resume-guard' && session) {
@@ -778,10 +855,15 @@ export default function App() {
         {persistBanner}
         <HomeScreen
           activeSession={session}
+          quickCountActive={quickEntries.length}
           onNewReceival={() => setNav(session ? 'resume-guard' : 'session-setup')}
           onResume={() => {
             setView('scan');
             setNav('capture');
+          }}
+          onQuickCount={() => {
+            setQuickSavedCount(loadSavedQuickCounts().length);
+            setNav('quick-count');
           }}
           onHistory={() => setNav('history')}
           onLabels={() => setNav('labels')}

@@ -21,6 +21,12 @@ export const STORAGE_KEYS = {
   manualUnit: 'cw.manualUnit',
   /** Per-supplier product names seen at manual starts (type-ahead memory). */
   supplierProducts: 'cw.supplierProducts',
+  /** The in-progress Quick Count entries (flat weight tally, survives reload). */
+  quickCountActive: 'cw.quickCountActive',
+  /** Quick Count keypad unit (kg default; separate from receival manual unit). */
+  quickCountUnit: 'cw.quickCountUnit',
+  /** Saved Quick Counts — a SEPARATE scratchpad list, never mixed into History. */
+  quickCounts: 'cw.quickCounts',
   // NB: sessions now live in IndexedDB (see lib/persistence.ts). The legacy
   // localStorage session keys (cw.currentSession.v2/.v3/.v4) are imported and
   // migrated there on first boot.

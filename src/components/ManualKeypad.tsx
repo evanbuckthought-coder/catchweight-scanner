@@ -4,15 +4,18 @@ import { weightWarnings } from '../lib/guardrails';
 import { roundKg, toKg, type WeightUnit } from '../lib/units';
 
 interface ManualKeypadProps {
-  /** Active product the keypad counts into (guaranteed by the caller). */
-  productName: string;
+  /** Active product the keypad counts into. Omit for a context-free tally
+   *  (Quick Count) — the product/batch line is then hidden. */
+  productName?: string;
   /** Batch inherited onto each manual carton (shown for transparency). */
   lastBatch?: string;
   /** Persisted unit — kg by default, set once for lb suppliers. */
   unit: WeightUnit;
   onUnitChange: (unit: WeightUnit) => void;
-  /** Save the carton. Caller commits instantly — the pad has already gated. */
+  /** Save the weight. Caller commits instantly — the pad has already gated. */
   onCommit: (netWeight: number, unit: WeightUnit) => void;
+  /** ENTER label — defaults to the receival wording. */
+  enterLabel?: string;
 }
 
 const KEY_ROWS: KeypadKey[][] = [
@@ -29,7 +32,14 @@ const KEY_ROWS: KeypadKey[][] = [
  * (typo catch); product/supplier/GTIN/batch are inherited from the active
  * product and the carton is flagged "manual" exactly as before.
  */
-export function ManualKeypad({ productName, lastBatch, unit, onUnitChange, onCommit }: ManualKeypadProps) {
+export function ManualKeypad({
+  productName,
+  lastBatch,
+  unit,
+  onUnitChange,
+  onCommit,
+  enterLabel = '⏎ ENTER — count carton',
+}: ManualKeypadProps) {
   const [value, setValue] = useState('');
   const [rangeWarnings, setRangeWarnings] = useState<string[] | null>(null);
 
@@ -62,10 +72,16 @@ export function ManualKeypad({ productName, lastBatch, unit, onUnitChange, onCom
       {/* Context + unit toggle */}
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold text-slate-200">{productName}</div>
-          <div className="truncate text-xs text-slate-500">
-            Batch {lastBatch || '—'} (inherited) · flagged “manual”
-          </div>
+          {productName ? (
+            <>
+              <div className="truncate text-sm font-semibold text-slate-200">{productName}</div>
+              <div className="truncate text-xs text-slate-500">
+                Batch {lastBatch || '—'} (inherited) · flagged “manual”
+              </div>
+            </>
+          ) : (
+            <div className="text-sm font-semibold text-slate-300">Key a weight</div>
+          )}
         </div>
         <div className="flex shrink-0 overflow-hidden rounded-lg ring-1 ring-slate-600">
           {(['kg', 'lb'] as WeightUnit[]).map((u) => (
@@ -154,7 +170,7 @@ export function ManualKeypad({ productName, lastBatch, unit, onUnitChange, onCom
         onClick={enter}
         className="h-16 rounded-xl bg-emerald-500 text-xl font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
       >
-        ⏎ ENTER — count carton
+        {enterLabel}
       </button>
     </div>
   );
