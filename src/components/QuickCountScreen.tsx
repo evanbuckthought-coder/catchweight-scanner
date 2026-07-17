@@ -55,7 +55,7 @@ export function QuickCountScreen({
   onViewSaved,
   savedCount,
 }: QuickCountScreenProps) {
-  const [mode, setMode] = useState<'barcode' | 'manual'>('manual');
+  const [mode, setMode] = useState<'barcode' | 'manual'>('barcode');
   const [view, setView] = useState<'count' | 'finish'>('count');
   const [feedback, setFeedback] = useState('');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
