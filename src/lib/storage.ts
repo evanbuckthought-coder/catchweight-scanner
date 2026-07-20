@@ -27,6 +27,12 @@ export const STORAGE_KEYS = {
   quickCountUnit: 'cw.quickCountUnit',
   /** Saved Quick Counts — a SEPARATE scratchpad list, never mixed into History. */
   quickCounts: 'cw.quickCounts',
+  /** Learned carton (pack) weight per GTIN for set-weight chicken lines. */
+  chickenPacks: 'cw.chickenPacks',
+  /** The in-progress Fresh Chicken count (survives reload). */
+  chickenActive: 'cw.chickenCountActive',
+  /** Saved Fresh Chicken counts — its own list, apart from History. */
+  chickenCounts: 'cw.chickenCounts',
   // NB: sessions now live in IndexedDB (see lib/persistence.ts). The legacy
   // localStorage session keys (cw.currentSession.v2/.v3/.v4) are imported and
   // migrated there on first boot.

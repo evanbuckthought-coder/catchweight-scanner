@@ -48,6 +48,13 @@ import {
   saveQuickCount,
   type QuickCountEntry,
 } from './lib/quickCount';
+import { ChickenCountScreen } from './components/ChickenCountScreen';
+import { ChickenCountsListScreen } from './components/ChickenCountsListScreen';
+import {
+  loadSavedChickenCounts,
+  saveChickenCount,
+  type ChickenEntry,
+} from './lib/chicken';
 
 type ToastKind = 'info' | 'warn' | 'error';
 interface Toast {
@@ -170,6 +177,8 @@ export default function App() {
     | 'settings'
     | 'quick-count'
     | 'quick-counts'
+    | 'chicken'
+    | 'chicken-counts'
   >('home');
   const [view, setView] = useState<'scan' | 'summary'>('scan');
   /** Capture mode: barcode camera, or the manual-entry keypad (primary modes).
@@ -191,6 +200,12 @@ export default function App() {
   );
   const [quickUnit, setQuickUnit] = useLocalStorage<WeightUnit>(STORAGE_KEYS.quickCountUnit, 'kg');
   const [quickSavedCount, setQuickSavedCount] = useState(() => loadSavedQuickCounts().length);
+  /** Fresh Chicken — in-progress carton tally + saved-count badge. */
+  const [chickenEntries, setChickenEntries] = useLocalStorage<ChickenEntry[]>(
+    STORAGE_KEYS.chickenActive,
+    [],
+  );
+  const [chickenSavedCount, setChickenSavedCount] = useState(() => loadSavedChickenCounts().length);
 
   const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
   /**
@@ -686,6 +701,30 @@ export default function App() {
     showToast('Quick count saved on device', 'info');
   }, [quickEntries, scannedBy, setQuickEntries, showToast]);
 
+  // --- Fresh Chicken (carton tally, separate from receivals) -----------------
+
+  const chickenAdd = useCallback(
+    (entry: ChickenEntry) => setChickenEntries((prev) => [...prev, entry]),
+    [setChickenEntries],
+  );
+  const chickenRemove = useCallback(
+    (id: string) => setChickenEntries((prev) => prev.filter((e) => e.id !== id)),
+    [setChickenEntries],
+  );
+  const chickenClear = useCallback(() => setChickenEntries([]), [setChickenEntries]);
+  const chickenDiscard = useCallback(() => {
+    setChickenEntries([]);
+    setNav('home');
+  }, [setChickenEntries]);
+  const chickenSave = useCallback(() => {
+    if (chickenEntries.length === 0) return;
+    saveChickenCount(chickenEntries, scannedBy);
+    setChickenEntries([]);
+    setChickenSavedCount(loadSavedChickenCounts().length);
+    setNav('home');
+    showToast('Chicken count saved on device', 'info');
+  }, [chickenEntries, scannedBy, setChickenEntries, showToast]);
+
   const handleExport = useCallback(async () => {
     const cur = sessionRef.current;
     if (!cur || allCartons(cur).length === 0) {
@@ -813,6 +852,34 @@ export default function App() {
     );
   }
 
+  if (nav === 'chicken') {
+    return (
+      <ChickenCountScreen
+        scannedBy={scannedBy}
+        entries={chickenEntries}
+        onAdd={chickenAdd}
+        onRemove={chickenRemove}
+        onClear={chickenClear}
+        onDiscard={chickenDiscard}
+        onSave={chickenSave}
+        onExit={() => setNav('home')}
+        onViewSaved={() => setNav('chicken-counts')}
+        savedCount={chickenSavedCount}
+      />
+    );
+  }
+
+  if (nav === 'chicken-counts') {
+    return (
+      <ChickenCountsListScreen
+        onBack={() => {
+          setChickenSavedCount(loadSavedChickenCounts().length);
+          setNav('chicken');
+        }}
+      />
+    );
+  }
+
   // New receival tapped while an unfinished session exists: never silently
   // clobber it — the operator explicitly resumes or discards first.
   if (nav === 'resume-guard' && session) {
@@ -856,6 +923,7 @@ export default function App() {
         <HomeScreen
           activeSession={session}
           quickCountActive={quickEntries.length}
+          chickenActive={chickenEntries.length}
           onNewReceival={() => setNav(session ? 'resume-guard' : 'session-setup')}
           onResume={() => {
             setView('scan');
@@ -864,6 +932,10 @@ export default function App() {
           onQuickCount={() => {
             setQuickSavedCount(loadSavedQuickCounts().length);
             setNav('quick-count');
+          }}
+          onChicken={() => {
+            setChickenSavedCount(loadSavedChickenCounts().length);
+            setNav('chicken');
           }}
           onHistory={() => setNav('history')}
           onLabels={() => setNav('labels')}

@@ -8,7 +8,10 @@
 
 import type * as XLSXType from 'xlsx';
 import { STORAGE_KEYS, loadJSON, saveJSON, uid } from './storage';
+import { fileStamp, shareOrDownloadFile, XLSX_MIME, type ShareResult } from './shareFile';
 import { roundKg, type WeightUnit } from './units';
+
+export type { ShareResult };
 
 /** One weight in a quick count (barcode-scanned or keyed). */
 export interface QuickCountEntry {
@@ -100,22 +103,10 @@ async function buildQuickCountWorkbook(
   return wb;
 }
 
-function quickCountFilename(when: string): string {
-  const d = new Date(when);
-  const ts = Number.isNaN(d.getTime())
-    ? 'count'
-    : `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}_${String(
-        d.getHours(),
-      ).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`;
-  return `quickcount_${ts}.xlsx`;
-}
-
 /** Warm the xlsx chunk so the share call has minimal async gap (iOS gesture). */
 export function preloadXlsx(): void {
   void import('xlsx').catch(() => {});
 }
-
-export type ShareResult = 'shared' | 'downloaded' | 'cancelled';
 
 /**
  * Build the flat-list workbook and hand it to the device share sheet
@@ -130,29 +121,6 @@ export async function exportQuickCount(
   const XLSX = await import('xlsx');
   const wb = await buildQuickCountWorkbook(XLSX, entries, meta);
   const array = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
-  const filename = quickCountFilename(meta.when);
-  const type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-  const blob = new Blob([array], { type });
-
-  const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
-  const file = new File([blob], filename, { type });
-  if (typeof nav.share === 'function' && nav.canShare?.({ files: [file] })) {
-    try {
-      await nav.share({ files: [file], title: 'Quick Count' });
-      return 'shared';
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return 'cancelled';
-      // otherwise fall through to a download
-    }
-  }
-
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  return 'downloaded';
+  const blob = new Blob([array], { type: XLSX_MIME });
+  return shareOrDownloadFile(blob, `quickcount_${fileStamp(meta.when)}.xlsx`);
 }

@@ -3,6 +3,7 @@ import type { GtinProfile } from '../types';
 import { loadOcrProfiles, removeOcrProfile, type OcrLabelProfile } from '../lib/ocrProfiles';
 import { TeachLabelFlow } from './TeachLabelFlow';
 import { OcrTrialScreen } from './OcrTrialScreen';
+import { loadChickenPacks, removeChickenPack, type ChickenPackProfile } from '../lib/chicken';
 
 interface LabelIntelligenceScreenProps {
   /** Saved GTIN profiles (App owns this state so capture prefills stay fresh). */
@@ -13,7 +14,7 @@ interface LabelIntelligenceScreenProps {
   onBack: () => void;
 }
 
-type SubView = 'menu' | 'teach' | 'gtin' | 'ocr' | 'ocrtrial';
+type SubView = 'menu' | 'teach' | 'gtin' | 'ocr' | 'ocrtrial' | 'chickenpacks';
 
 /**
  * Label Intelligence: the home for everything that teaches the app about
@@ -33,6 +34,10 @@ export function LabelIntelligenceScreen({
   const [ocrProfiles, setOcrProfiles] = useState<OcrLabelProfile[]>(() => loadOcrProfiles());
   const [confirmOcrDelete, setConfirmOcrDelete] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
+  const [chickenPacks, setChickenPacks] = useState<Record<string, ChickenPackProfile>>(() =>
+    loadChickenPacks(),
+  );
+  const [confirmPackDelete, setConfirmPackDelete] = useState<string | null>(null);
 
   const gtinList = Object.values(profiles).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 
@@ -75,6 +80,79 @@ export function LabelIntelligenceScreen({
       <div className="mx-auto flex min-h-screen max-w-md flex-col gap-4 p-4">
         {header('OCR (experimental)', () => setSub('menu'))}
         <OcrTrialScreen onTeach={() => setSub('teach')} />
+      </div>
+    );
+  }
+
+  // ---- Chicken pack weights (learned set-weight cartons) -------------------
+  if (sub === 'chickenpacks') {
+    const packs = Object.values(chickenPacks).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    return (
+      <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-4">
+        {header('Chicken pack weights', () => setSub('menu'))}
+        <p className="text-xs text-slate-500">
+          Carton weights learned in Fresh Chicken for set-weight lines (whose barcode carries no
+          weight). Delete one to be asked for it again on the next scan.
+        </p>
+        {packs.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
+            No pack weights learned yet — Fresh Chicken asks for one the first time it sees a
+            set-weight product.
+          </div>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {packs.map((p) => (
+              <li key={p.gtin} className="rounded-xl bg-slate-800/70 px-3 py-3 ring-1 ring-slate-700">
+                <div className="flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-semibold text-slate-100">
+                      {p.product || '(unnamed product)'}
+                    </div>
+                    <div className="truncate text-xs text-slate-400">
+                      GTIN {p.gtin} ·{' '}
+                      {p.packKg == null ? (
+                        <span className="text-amber-300">count only, no weight</span>
+                      ) : (
+                        <span className="font-mono text-emerald-400">{p.packKg.toFixed(2)} kg/carton</span>
+                      )}
+                    </div>
+                  </div>
+                  {confirmPackDelete === p.gtin ? (
+                    <div className="flex shrink-0 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setConfirmPackDelete(null)}
+                        className="rounded-lg bg-slate-700 px-2 py-2 text-xs font-medium text-slate-200"
+                      >
+                        Keep
+                      </button>
+                      <button
+                        type="button"
+                        data-testid={`pack-delete-confirm-${p.gtin}`}
+                        onClick={() => {
+                          setChickenPacks({ ...removeChickenPack(p.gtin) });
+                          setConfirmPackDelete(null);
+                        }}
+                        className="rounded-lg bg-rose-500 px-2 py-2 text-xs font-bold text-slate-900"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid={`pack-delete-${p.gtin}`}
+                      onClick={() => setConfirmPackDelete(p.gtin)}
+                      className="shrink-0 rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-rose-300"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     );
   }
@@ -321,6 +399,18 @@ export function LabelIntelligenceScreen({
         🔤 OCR label profiles
         <span className="block text-xs font-normal text-slate-500">
           {ocrProfiles.length} saved · created by Teach a new label
+        </span>
+      </button>
+
+      <button
+        type="button"
+        data-testid="labels-chickenpacks"
+        onClick={() => setSub('chickenpacks')}
+        className="rounded-xl bg-slate-800 px-4 py-4 text-left text-base font-semibold text-slate-200 ring-1 ring-slate-600 active:bg-slate-700"
+      >
+        🐔 Chicken pack weights
+        <span className="block text-xs font-normal text-slate-500">
+          {Object.keys(chickenPacks).length} learned · set-weight cartons · delete to relearn
         </span>
       </button>
 

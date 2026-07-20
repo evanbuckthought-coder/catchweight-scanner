@@ -6,9 +6,12 @@ interface HomeScreenProps {
   activeSession: Session | null;
   /** Items in an in-progress Quick Count (0 = none). */
   quickCountActive: number;
+  /** Cartons in an in-progress Fresh Chicken count (0 = none). */
+  chickenActive: number;
   onNewReceival: () => void;
   onResume: () => void;
   onQuickCount: () => void;
+  onChicken: () => void;
   onHistory: () => void;
   onLabels: () => void;
   onSettings: () => void;
@@ -23,9 +26,11 @@ interface HomeScreenProps {
 export function HomeScreen({
   activeSession,
   quickCountActive,
+  chickenActive,
   onNewReceival,
   onResume,
   onQuickCount,
+  onChicken,
   onHistory,
   onLabels,
   onSettings,
@@ -94,6 +99,26 @@ export function HomeScreen({
         {quickCountActive > 0 && (
           <span className="shrink-0 rounded-full bg-amber-500/30 px-2.5 py-1 text-xs font-bold text-amber-100 ring-1 ring-amber-500/50">
             {quickCountActive} in progress
+          </span>
+        )}
+      </button>
+
+      {/* Fresh Chicken — carton tally for chicken barcodes (set + random weight). */}
+      <button
+        type="button"
+        data-testid="home-chicken"
+        onClick={onChicken}
+        className="flex items-center justify-between gap-3 rounded-2xl border-2 border-dashed border-orange-500/60 bg-orange-500/10 px-4 py-4 text-left active:bg-orange-500/20"
+      >
+        <div className="min-w-0">
+          <div className="text-lg font-bold text-orange-200">🐔 Fresh Chicken</div>
+          <div className="mt-0.5 text-xs text-orange-200/70">
+            Count chicken cartons &amp; weights from the barcode. Not a receival.
+          </div>
+        </div>
+        {chickenActive > 0 && (
+          <span className="shrink-0 rounded-full bg-orange-500/30 px-2.5 py-1 text-xs font-bold text-orange-100 ring-1 ring-orange-500/50">
+            {chickenActive} in progress
           </span>
         )}
       </button>
