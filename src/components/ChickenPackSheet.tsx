@@ -7,6 +7,8 @@ interface ChickenPackSheetProps {
   parsed: ParsedCarton;
   /** Save the learned pack weight (kg), or null for "count only, no kg". */
   onSave: (product: string, packKg: number | null) => void;
+  /** Hand off to the AI teach flow to read the description + pack size. */
+  onTeachWithAi: () => void;
   onCancel: () => void;
 }
 
@@ -16,7 +18,7 @@ interface ChickenPackSheetProps {
  * pack size, e.g. 10 kg — then remembered per GTIN and applied automatically
  * to every later scan of that product.
  */
-export function ChickenPackSheet({ gtin, parsed, onSave, onCancel }: ChickenPackSheetProps) {
+export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel }: ChickenPackSheetProps) {
   const [product, setProduct] = useState('');
   const [weight, setWeight] = useState('');
 
@@ -49,7 +51,24 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onCancel }: ChickenPack
           {dates.length > 0 && <div className="mt-0.5">{dates.join(' · ')}</div>}
         </div>
 
-        <label className="mt-4 block text-sm font-medium text-slate-300">
+        <button
+          type="button"
+          data-testid="chicken-pack-ai"
+          onClick={onTeachWithAi}
+          className="mt-4 h-12 w-full rounded-xl bg-indigo-500 text-base font-bold text-white active:bg-indigo-400"
+        >
+          📷 Read the label with AI
+          <span className="block text-[11px] font-medium text-indigo-100/80">
+            fills in the description &amp; pack size — needs internet
+          </span>
+        </button>
+
+        <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+          <span className="h-px flex-1 bg-slate-700" /> or enter it yourself{' '}
+          <span className="h-px flex-1 bg-slate-700" />
+        </div>
+
+        <label className="mt-2 block text-sm font-medium text-slate-300">
           Product name <span className="text-slate-500">(optional)</span>
           <input
             data-testid="chicken-pack-product"

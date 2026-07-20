@@ -51,6 +51,7 @@ function mockTeachApi(): Plugin {
                   decimalPlaces: 3,
                   region: 'bottom-right, inside the boxed grid',
                   anchorText: 'NET WEIGHT',
+                  nominalPackKg: 10,
                   confidence: 'high',
                 },
                 dates: [

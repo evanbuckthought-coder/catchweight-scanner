@@ -38,6 +38,13 @@ export interface TeachWeight {
   region: string | null;
   /** Literal text printed next to the weight (e.g. "NET WEIGHT", "Net kg"). */
   anchorText: string | null;
+  /**
+   * Nominal carton/pack SIZE stated on the label (the "10" in "FS FDSERV
+   * WINGS 10KG"), in kg — null when the label states no pack size. Distinct
+   * from the actual printed net weight: on a set-weight carton the barcode
+   * carries no weight, so this is the per-carton figure a count uses.
+   */
+  nominalPackKg: number | null;
   confidence: TeachConfidence;
 }
 
@@ -111,7 +118,7 @@ Identify, where present (use null when absent, never guess values):
 - manufacturer: the manufacturing company if printed separately from the supplier/brand (else null)
 - product: the product description as printed
 - gtin: the barcode number (GTIN/EAN) if printed as human-readable digits, and classify the barcode: "gs1-128-weight" if it is a GS1-128 whose human-readable line shows AIs including a net weight (310n or 320n), "gs1-128" if GS1-128 without a weight AI, "plain" for a simple product/carton barcode, "none" if no barcode is visible, "unknown" if unclear
-- weight: the NET weight — its printed example exactly as shown, the unit (kg or lb), how many decimal places, WHERE on the label it sits (short region description, e.g. "bottom-right, inside the boxed grid"), and the literal anchor text printed beside it (e.g. "NET WEIGHT", "Net kg"). Ignore GROSS/TARE weights.
+- weight: the NET weight — its printed example exactly as shown, the unit (kg or lb), how many decimal places, WHERE on the label it sits (short region description, e.g. "bottom-right, inside the boxed grid"), and the literal anchor text printed beside it (e.g. "NET WEIGHT", "Net kg"). Ignore GROSS/TARE weights. Also give nominalPackKg: the nominal carton/pack SIZE stated on the label in kg — the "10" in a product description like "FS FDSERV WINGS 10KG", or the "12" in "CHICKEN TENDERLOINS 12KG AP" — or null if the label states no pack size. This is the fixed per-carton size, which is NOT the same as the actual printed net weight.
 - dates: every date on the label — classify each as production / packaging / best-before / use-by / unknown, give the printed FORMAT (e.g. "DD/MM/YYYY", "DD MMM YYYY", "YYMMDD") not the actual date, and the label text beside it
 - batch: the batch/lot number if printed (the value as printed, so the human can verify)
 - serial: a per-carton serial number if printed
@@ -156,9 +163,10 @@ export const TEACH_OUTPUT_SCHEMA = {
         decimalPlaces: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
         region: nullableString,
         anchorText: nullableString,
+        nominalPackKg: { anyOf: [{ type: 'number' }, { type: 'null' }] },
         confidence,
       },
-      required: ['printedExample', 'unit', 'decimalPlaces', 'region', 'anchorText', 'confidence'],
+      required: ['printedExample', 'unit', 'decimalPlaces', 'region', 'anchorText', 'nominalPackKg', 'confidence'],
       additionalProperties: false,
     },
     dates: {
