@@ -70,7 +70,7 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel
         </div>
 
         <label className="mt-2 block text-sm font-medium text-slate-300">
-          Product name <span className="text-slate-500">(optional)</span>
+          Product name *
           <input
             data-testid="chicken-pack-product"
             value={product}
@@ -97,7 +97,7 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel
         <button
           type="button"
           data-testid="chicken-pack-save"
-          disabled={!weightValid}
+          disabled={!weightValid || !product.trim()}
           onClick={() => onSave(product.trim(), kg)}
           className="mt-4 h-14 w-full rounded-xl bg-emerald-500 text-lg font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
         >
@@ -107,8 +107,9 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel
         <button
           type="button"
           data-testid="chicken-pack-countonly"
+          disabled={!product.trim()}
           onClick={() => onSave(product.trim(), null)}
-          className="mt-2 h-12 w-full rounded-xl bg-slate-800 text-base font-semibold text-slate-300 ring-1 ring-slate-600 active:bg-slate-700"
+          className="mt-2 h-12 w-full rounded-xl bg-slate-800 text-base font-semibold text-slate-300 ring-1 ring-slate-600 active:bg-slate-700 disabled:opacity-40"
         >
           Count cartons only — no weight
         </button>

@@ -148,7 +148,13 @@ export function materializeEntries(
   entries: ChickenEntry[],
   packs: Record<string, ChickenPackProfile> = loadChickenPacks(),
 ): ChickenEntry[] {
-  return entries.map((e) => ({ ...e, weightKg: roundKg(entryKg(e, packs)) }));
+  // Also backfill the product name for entries counted before their GTIN was
+  // named, so a spreadsheet never shows "(unnamed)" once the name is known.
+  return entries.map((e) => ({
+    ...e,
+    weightKg: roundKg(entryKg(e, packs)),
+    product: e.product || packs[e.gtin]?.product || '',
+  }));
 }
 
 export interface ChickenProductRow {
@@ -189,7 +195,14 @@ export function chickenByProduct(
     if (!row.product && e.product) row.product = e.product;
     map.set(e.gtin, row);
   }
-  return [...map.values()];
+  const rows = [...map.values()];
+  // Entries counted before their GTIN was named pick the name up from the
+  // profile, so the breakdown (and Summary sheet) never shows unnamed rows
+  // once the product has been taught.
+  for (const row of rows) {
+    if (!row.product) row.product = packs[row.gtin]?.product ?? '';
+  }
+  return rows;
 }
 
 // --- saved counts -----------------------------------------------------------
@@ -225,6 +238,7 @@ export type ScanOutcome =
   | { kind: 'not-gs1' }
   | { kind: 'duplicate'; serial: string }
   | { kind: 'needs-pack'; parsed: ParsedCarton; gtin: string }
+  | { kind: 'needs-name'; parsed: ParsedCarton; gtin: string }
   | { kind: 'counted'; entry: ChickenEntry };
 
 /**
@@ -235,7 +249,10 @@ export type ScanOutcome =
  *  - a serial (AI 21) already counted -> duplicate carton;
  *  - taught 'set' product -> COUNT THE CARTON (kg derives from the profile;
  *    the user's choice wins even if the barcode happened to carry a weight);
- *  - weight in the barcode -> actual weight, counts straight away (random);
+ *  - weight in the barcode + a NAMED profile -> actual weight, counts
+ *    straight away (random);
+ *  - weight in the barcode, no name known -> ask for the product name once
+ *    (nothing may count unnamed — "(unnamed)" on a spreadsheet is a defect);
  *  - otherwise -> unknown set-weight product: ask for its set weight once.
  */
 export function resolveChickenScan(
@@ -254,15 +271,18 @@ export function resolveChickenScan(
 
   const pack = packs[gtin];
 
-  if (pack?.type === 'set') {
+  // An unnamed set profile (first release allowed it) re-prompts below so the
+  // name gets captured; a named one counts.
+  if (pack?.type === 'set' && pack.product) {
     return { kind: 'counted', entry: entryFromPack(parsed, pack) };
   }
 
   if (parsed.weightKg != null) {
+    if (!pack?.product) return { kind: 'needs-name', parsed, gtin };
     const base = entryBase(parsed, gtin);
     return {
       kind: 'counted',
-      entry: { ...base, product: pack?.product ?? '', weightKg: parsed.weightKg, weightSource: 'barcode' },
+      entry: { ...base, product: pack.product, weightKg: parsed.weightKg, weightSource: 'barcode' },
     };
   }
 

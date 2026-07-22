@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScannerView } from './ScannerView';
+import { ChickenNameSheet } from './ChickenNameSheet';
 import { ChickenPackSheet } from './ChickenPackSheet';
 import { ChickenPalletSheet } from './ChickenPalletSheet';
 import { ChickenTeachFlow } from './ChickenTeachFlow';
@@ -66,10 +67,13 @@ export function ChickenCountScreen({
   const [view, setView] = useState<'count' | 'finish'>('count');
   const [feedback, setFeedback] = useState<{ text: string; ok: boolean } | null>(null);
   const [pending, setPending] = useState<{ parsed: ParsedCarton; gtin: string } | null>(null);
-  /** AI teach flow — from the header (learn ahead) or the first-scan prompt. */
+  /** First scan of an unknown random-weight product — name it before it counts. */
+  const [naming, setNaming] = useState<{ parsed: ParsedCarton; gtin: string } | null>(null);
+  /** AI teach flow — from the header (learn ahead) or a first-scan prompt. */
   const [teaching, setTeaching] = useState<{
     gtin?: string;
     parsed?: ParsedCarton;
+    type?: 'set' | 'random';
     /** Count the carton that triggered the prompt once the label is taught. */
     countAfter?: ParsedCarton;
   } | null>(null);
@@ -128,33 +132,57 @@ export function ChickenCountScreen({
         sheetGateRef.current = true;
         setPending({ parsed: outcome.parsed, gtin: outcome.gtin });
         return;
-      case 'counted': {
-        // A random-weight product never passes through the pack sheet, so it
-        // has no learned name — fall back to one the app already knows from a
-        // previous receival of the same GTIN.
-        const e =
-          outcome.entry.product === ''
-            ? { ...outcome.entry, product: getProfile(outcome.entry.gtin)?.productName ?? '' }
-            : outcome.entry;
-        onAdd(e);
-        setLastCounted(e);
-        signalSuccess();
-        // Cartons are the primary figure — lead with the count.
-        if (e.weightSource === 'barcode') {
-          setFeedback({
-            text: `+1 carton · ${roundKg(e.weightKg).toFixed(2)} kg${e.product ? ` · ${e.product}` : ''}`,
-            ok: true,
-          });
-        } else {
-          const ctns = entries.filter((x) => x.gtin === e.gtin).length + 1;
-          setFeedback({
-            text: `✓ Carton counted · ${e.product || `GTIN ${e.gtin}`} (${ctns} ctn)`,
-            ok: true,
-          });
+      case 'needs-name': {
+        // The app may already know this GTIN's name from a receival — reuse
+        // it silently instead of asking.
+        const known = getProfile(outcome.gtin)?.productName?.trim();
+        if (known) {
+          saveName(outcome.gtin, known, outcome.parsed);
+          return;
         }
+        sheetGateRef.current = true;
+        setNaming({ parsed: outcome.parsed, gtin: outcome.gtin });
         return;
       }
+      case 'counted':
+        countEntry(outcome.entry);
+        return;
     }
+  };
+
+  /** Add a counted carton with carton-led feedback. */
+  const countEntry = (e: ChickenEntry) => {
+    onAdd(e);
+    setLastCounted(e);
+    signalSuccess();
+    if (e.weightSource === 'barcode') {
+      setFeedback({
+        text: `+1 carton · ${roundKg(e.weightKg).toFixed(2)} kg${e.product ? ` · ${e.product}` : ''}`,
+        ok: true,
+      });
+    } else {
+      const ctns = entries.filter((x) => x.gtin === e.gtin).length + 1;
+      setFeedback({
+        text: `✓ Carton counted · ${e.product || `GTIN ${e.gtin}`} (${ctns} ctn)`,
+        ok: true,
+      });
+    }
+  };
+
+  /** Name a random-weight product (asked once) and count the waiting carton. */
+  const saveName = (gtin: string, product: string, parsed: ParsedCarton) => {
+    const profile = {
+      gtin,
+      product,
+      type: 'random' as const,
+      packKg: null,
+      updatedAt: new Date().toISOString(),
+    };
+    upsertChickenPack(profile);
+    const out = resolveChickenScan(parsed, entries, { [gtin]: profile });
+    if (out.kind === 'counted') countEntry(out.entry);
+    setNaming(null);
+    sheetGateRef.current = false;
   };
 
   const savePack = (product: string, packKg: number | null) => {
@@ -385,7 +413,7 @@ export function ChickenCountScreen({
 
       <ScannerView
         active
-        paused={!!pending || !!teaching || !!pallet}
+        paused={!!pending || !!naming || !!teaching || !!pallet}
         mode="barcode"
         onDecode={handleDecode}
         onOcrRead={() => {}}
@@ -404,7 +432,7 @@ export function ChickenCountScreen({
         </div>
       )}
 
-      {palletAnchor && !pending && !teaching && !pallet && (
+      {palletAnchor && !pending && !naming && !teaching && !pallet && (
         <button
           type="button"
           data-testid="chicken-pallet-open"
@@ -448,7 +476,9 @@ export function ChickenCountScreen({
                     <span className="font-mono font-semibold tabular-nums">
                       {kg > 0 ? `${roundKg(kg).toFixed(2)} kg ` : '— '}
                     </span>
-                    <span className="text-slate-400">{e.product || `GTIN ${e.gtin}`}</span>
+                    <span className="text-slate-400">
+                      {e.product || packs[e.gtin]?.product || `GTIN ${e.gtin}`}
+                    </span>
                   </div>
                   <div className="truncate text-[11px] text-slate-500">
                     {isBarcode
@@ -551,9 +581,26 @@ export function ChickenCountScreen({
           gtin={pending.gtin}
           parsed={pending.parsed}
           onSave={savePack}
-          onTeachWithAi={() => setTeaching({ gtin: pending.gtin, parsed: pending.parsed, countAfter: pending.parsed })}
+          onTeachWithAi={() =>
+            setTeaching({ gtin: pending.gtin, parsed: pending.parsed, type: 'set', countAfter: pending.parsed })
+          }
           onCancel={() => {
             setPending(null);
+            sheetGateRef.current = false;
+          }}
+        />
+      )}
+
+      {naming && !teaching && (
+        <ChickenNameSheet
+          gtin={naming.gtin}
+          parsed={naming.parsed}
+          onSave={(product) => saveName(naming.gtin, product, naming.parsed)}
+          onTeachWithAi={() =>
+            setTeaching({ gtin: naming.gtin, parsed: naming.parsed, type: 'random', countAfter: naming.parsed })
+          }
+          onCancel={() => {
+            setNaming(null);
             sheetGateRef.current = false;
           }}
         />
@@ -563,33 +610,37 @@ export function ChickenCountScreen({
         <ChickenTeachFlow
           initialGtin={teaching.gtin}
           initialParsed={teaching.parsed}
-          initialType={teaching.gtin ? 'set' : undefined}
+          initialType={teaching.type}
           onSaved={(profile) => {
-            // Learned mid-count: count the carton that raised the prompt.
-            if (teaching.countAfter && profile.type === 'set') {
-              const entry = entryFromPack(teaching.countAfter, profile);
-              onAdd(entry);
-              setLastCounted(entry);
-              signalSuccess();
-              setFeedback({
-                text: `✓ Carton counted · ${profile.product}${
-                  profile.packKg != null ? ` (${profile.packKg} kg/ctn)` : ''
-                }`,
-                ok: true,
+            // Learned mid-count: count the carton that raised the prompt —
+            // re-resolving with the fresh profile handles both types (set
+            // derives, random reads the barcode weight under the new name).
+            let counted = false;
+            if (teaching.countAfter) {
+              const out = resolveChickenScan(teaching.countAfter, entries, {
+                ...packs,
+                [profile.gtin]: profile,
               });
-            } else {
+              if (out.kind === 'counted') {
+                countEntry(out.entry);
+                counted = true;
+              }
+            }
+            if (!counted) {
               setFeedback({ text: `Learned “${profile.product}” — ready to scan`, ok: true });
             }
             setTeaching(null);
             setPending(null);
+            setNaming(null);
             sheetGateRef.current = false;
           }}
           onCancel={() => {
             setTeaching(null);
-            // Keep the pack prompt open if a scan raised it, so the carton
-            // isn't silently dropped.
+            // Keep the first-scan prompt open if a scan raised it, so the
+            // carton isn't silently dropped.
             if (!teaching.countAfter) {
               setPending(null);
+              setNaming(null);
               sheetGateRef.current = false;
             }
           }}

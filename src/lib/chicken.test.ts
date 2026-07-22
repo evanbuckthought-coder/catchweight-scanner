@@ -43,16 +43,26 @@ const wingsProfile: ChickenPackProfile = {
   packKg: 10,
   updatedAt: 'now',
 };
+/** Named random-weight profile for the VDB whole bag. */
+const wholeBagProfile: ChickenPackProfile = {
+  gtin: '99420053912725',
+  product: 'Whole bag',
+  type: 'random',
+  packKg: null,
+  updatedAt: 'now',
+};
+const wholeBagPacks = { [wholeBagProfile.gtin]: wholeBagProfile };
 
 beforeEach(() => localStorage.clear());
 
 describe('resolveChickenScan — random-weight labels', () => {
-  it('counts straight from the barcode, capturing dates and serial', () => {
-    const out = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], {});
+  it('counts straight from the barcode once named, capturing dates and serial', () => {
+    const out = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], wholeBagPacks);
     expect(out.kind).toBe('counted');
     if (out.kind !== 'counted') return;
     expect(out.entry).toMatchObject({
       gtin: '99420053912725',
+      product: 'Whole bag',
       weightKg: 8.73,
       weightSource: 'barcode',
       productionDate: '2026-07-17',
@@ -61,14 +71,27 @@ describe('resolveChickenScan — random-weight labels', () => {
     });
   });
 
-  it('never asks for a pack weight when the barcode carries one', () => {
-    expect(resolveChickenScan(parseGS1(LABELS.vdbTenderloin), [], {}).kind).toBe('counted');
+  it('NOTHING counts unnamed — an unknown random product asks for a name first', () => {
+    const out = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], {});
+    expect(out.kind).toBe('needs-name');
+    if (out.kind !== 'needs-name') return;
+    expect(out.gtin).toBe('99420053912725');
+  });
+
+  it('a profile with an EMPTY name still asks (no way to count unnamed)', () => {
+    const packs = { '19420053906667': { gtin: '19420053906667', product: '', type: 'random' as const, packKg: null, updatedAt: 'now' } };
+    expect(resolveChickenScan(parseGS1(LABELS.vdbTenderloin), [], packs).kind).toBe('needs-name');
+  });
+
+  it('never asks for a pack WEIGHT when the barcode carries one', () => {
+    const packs = { '19420053906667': { gtin: '19420053906667', product: 'Tenderloins', type: 'random' as const, packKg: null, updatedAt: 'now' } };
+    expect(resolveChickenScan(parseGS1(LABELS.vdbTenderloin), [], packs).kind).toBe('counted');
   });
 
   it('rejects a second scan of the same serialised carton', () => {
-    const first = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], {});
+    const first = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], wholeBagPacks);
     if (first.kind !== 'counted') throw new Error('expected counted');
-    const again = resolveChickenScan(parseGS1(LABELS.vdbRandom), [first.entry], {});
+    const again = resolveChickenScan(parseGS1(LABELS.vdbRandom), [first.entry], wholeBagPacks);
     expect(again).toEqual({ kind: 'duplicate', serial: '134258' });
   });
 });
@@ -110,6 +133,11 @@ describe('resolveChickenScan — set-weight labels', () => {
     // Same barcode again (a different physical carton — no serial to tell apart)
     const b = resolveChickenScan(parsed, [a.entry]);
     expect(b.kind).toBe('counted');
+  });
+
+  it('an unnamed SET profile re-prompts so the name gets captured', () => {
+    const packs = { '19414735575524': { gtin: '19414735575524', product: '', type: 'set' as const, packKg: 10, updatedAt: 'now' } };
+    expect(resolveChickenScan(parseGS1(LABELS.inghamWings), [], packs).kind).toBe('needs-pack');
   });
 
   it("the user's SET choice wins even if the barcode carries a weight", () => {
@@ -202,11 +230,18 @@ describe('derived totals — cartons × set weight', () => {
     const m = materializeEntries([entry({ weightKg: 999 })], setPacks);
     expect(m[0].weightKg).toBe(10);
   });
+
+  it('backfills names onto entries counted before their GTIN was named', () => {
+    const unnamed = entry({ gtin: 'g9', product: '', weightKg: 12.22, weightSource: 'barcode' });
+    const packs = { g9: { gtin: 'g9', product: 'CHICKEN BRST SKINLESS', type: 'random' as const, packKg: null, updatedAt: 'now' } };
+    expect(materializeEntries([unnamed], packs)[0].product).toBe('CHICKEN BRST SKINLESS');
+    expect(chickenByProduct([unnamed], packs)[0].product).toBe('CHICKEN BRST SKINLESS');
+  });
 });
 
 describe('whole pallet — one scan, typed carton count', () => {
   it('random-weight pallet: copies record the scanned weight as an ESTIMATE, no serial', () => {
-    const scan = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], {});
+    const scan = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], wholeBagPacks);
     if (scan.kind !== 'counted') throw new Error('expected counted');
     const copies = palletCopies(scan.entry, 42);
     expect(copies).toHaveLength(41); // scanned carton already counted
@@ -221,7 +256,7 @@ describe('whole pallet — one scan, typed carton count', () => {
     expect(copies[0].serial).toBeUndefined(); // the serial belongs to the scanned carton
     expect(new Set(copies.map((c) => c.id)).size).toBe(41);
     // A later scan of the SAME carton still trips the duplicate check.
-    const again = resolveChickenScan(parseGS1(LABELS.vdbRandom), [scan.entry, ...copies], {});
+    const again = resolveChickenScan(parseGS1(LABELS.vdbRandom), [scan.entry, ...copies], wholeBagPacks);
     expect(again.kind).toBe('duplicate');
     // Totals: 42 × 8.73, estimates counting as random-weight kg.
     expect(chickenTotalKg([scan.entry, ...copies], {})).toBeCloseTo(366.66, 2);
