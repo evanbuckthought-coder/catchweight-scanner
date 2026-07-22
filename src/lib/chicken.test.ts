@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
+import * as XLSX from 'xlsx';
 import { parseGS1 } from './gs1';
 import {
+  buildChickenWorkbook,
   chickenByProduct,
   chickenTotalKg,
   entryFromPack,
@@ -232,6 +234,43 @@ describe('pack profiles and saved counts', () => {
     expect(localStorage.getItem('cw.chickenCounts')).toBeTruthy();
     expect(localStorage.getItem('cw.quickCounts')).toBeNull(); // never mixed
     expect(removeSavedChickenCount(rec.id)).toHaveLength(0);
+  });
+
+  it('workbook: Summary first with one line per product, Cartons second in product order', () => {
+    const e = (over: Partial<ChickenEntry>): ChickenEntry => ({
+      id: Math.random().toString(36).slice(2),
+      time: '2026-07-23T08:00:00.000Z',
+      gtin: 'g-wings',
+      product: 'FS FDSERV WINGS 10KG',
+      weightKg: 10,
+      weightSource: 'set',
+      raw: '',
+      ...over,
+    });
+    // Interleaved scan order: wings, whole, wings, whole.
+    const entries = [
+      e({ useBy: '2026-07-28', time: '2026-07-23T08:00:00.000Z' }),
+      e({ gtin: 'g-whole', product: 'Whole bag', weightKg: 8.73, weightSource: 'barcode', productionDate: '2026-07-17', bestBefore: '2026-07-29', time: '2026-07-23T08:01:00.000Z' }),
+      e({ useBy: '2026-07-30', time: '2026-07-23T08:02:00.000Z' }),
+      e({ gtin: 'g-whole', product: 'Whole bag', weightKg: 9.11, weightSource: 'barcode', productionDate: '2026-07-20', bestBefore: '2026-08-02', time: '2026-07-23T08:03:00.000Z' }),
+    ];
+    const wb = buildChickenWorkbook(XLSX, entries, { scannedBy: 'Evan', when: '2026-07-23T09:00:00.000Z' });
+    expect(wb.SheetNames).toEqual(['Summary', 'Cartons']);
+
+    const summary = XLSX.utils.sheet_to_json<(string | number)[]>(wb.Sheets.Summary, { header: 1 });
+    const head = summary.findIndex((r) => r[0] === 'Vendor item code');
+    expect(summary[head]).toEqual(['Vendor item code', 'Description', 'Total', 'Unit', 'Earliest date', 'Latest date']);
+    // One line per product: set totals in cartons, random totals in kg, with date range.
+    expect(summary[head + 1]).toEqual(['g-wings', 'FS FDSERV WINGS 10KG', 2, 'cartons (set weight)', '2026-07-28', '2026-07-30']);
+    expect(summary[head + 2]).toEqual(['g-whole', 'Whole bag', 17.84, 'kg (random weight)', '2026-07-29', '2026-08-02']);
+    // Grand totals: cartons and kg on their own rows.
+    expect(summary.find((r) => r[0] === 'TOTAL')?.slice(2, 4)).toEqual([4, 'cartons']);
+
+    // Cartons sheet is grouped in Summary product order despite interleaved scans.
+    const cartons = XLSX.utils.sheet_to_json<(string | number)[]>(wb.Sheets.Cartons, { header: 1 });
+    const products = cartons.slice(1, 5).map((r) => r[2]);
+    expect(products).toEqual(['FS FDSERV WINGS 10KG', 'FS FDSERV WINGS 10KG', 'Whole bag', 'Whole bag']);
+    expect(cartons.slice(1, 5).map((r) => r[0])).toEqual([1, 2, 3, 4]); // renumbered after sort
   });
 
   it('a saved count is a stable record — later set-weight edits do not rewrite it', () => {

@@ -304,16 +304,66 @@ function sourceLabel(e: ChickenEntry): string {
   return isSetEntry(e) ? 'Nominal (set weight)' : 'Actual (from barcode)';
 }
 
-function buildChickenWorkbook(
+/** The stock-rotation date a carton's barcode carries: best-before / use-by
+ *  (whichever the label prints), falling back to production date. */
+function rotationDate(e: ChickenEntry): string | undefined {
+  return e.bestBefore ?? e.useBy ?? e.productionDate;
+}
+
+/** Exported for tests — the app goes through exportChickenCount. */
+export function buildChickenWorkbook(
   XLSX: typeof XLSXType,
   entries: ChickenEntry[],
   meta: { scannedBy: string; when: string },
 ): XLSXType.WorkBook {
   // Entries are expected pre-materialized (weightKg final).
+  const rows = chickenByProduct(entries, {});
+
+  // Sheet 1 — Summary: ONE line per product. The total is the figure that
+  // matters for the line: carton count for set weight, kg for random weight.
+  const summary: (string | number)[][] = [
+    ['Fresh Chicken count (carton tally — not a formal receival)'],
+    ['Counted by', meta.scannedBy || '—'],
+    ['Date/time', formatDateTime(meta.when)],
+    ['Dates are the best-before / use-by from the barcodes'],
+    [],
+    ['Vendor item code', 'Description', 'Total', 'Unit', 'Earliest date', 'Latest date'],
+  ];
+  for (const r of rows) {
+    const dates = entries
+      .filter((e) => e.gtin === r.gtin)
+      .map(rotationDate)
+      .filter((d): d is string => !!d)
+      .sort();
+    summary.push([
+      r.gtin,
+      r.product || '(unnamed)',
+      r.type === 'set' ? r.cartons : r.kg,
+      r.type === 'set' ? 'cartons (set weight)' : 'kg (random weight)',
+      dates[0] ?? '',
+      dates[dates.length - 1] ?? '',
+    ]);
+  }
+  summary.push([]);
+  summary.push(['TOTAL', '', entries.length, 'cartons', '', '']);
+  summary.push(['', '', chickenTotalKg(entries, {}), 'kg', '', '']);
+  const wsSummary = XLSX.utils.aoa_to_sheet(summary);
+  wsSummary['!cols'] = [{ wch: 16 }, { wch: 34 }, { wch: 10 }, { wch: 20 }, { wch: 13 }, { wch: 13 }];
+
+  // Sheet 2 — Cartons: line by line, arranged in product order (the order the
+  // products appear on the Summary), scan order within a product.
+  const order = new Map(rows.map((r, i) => [r.gtin, i]));
+  const sorted = entries
+    .slice()
+    .sort(
+      (a, b) =>
+        (order.get(a.gtin) ?? 0) - (order.get(b.gtin) ?? 0) ||
+        (a.time < b.time ? -1 : a.time > b.time ? 1 : 0),
+    );
   const cartons: (string | number)[][] = [
     ['#', 'Time', 'Product', 'Type', 'GTIN', 'Weight (kg)', 'Weight basis', 'Production date', 'Best before', 'Use by', 'Batch/Lot', 'Serial', 'Raw barcode'],
   ];
-  entries.forEach((e, i) => {
+  sorted.forEach((e, i) => {
     cartons.push([
       i + 1,
       formatDateTime(e.time),
@@ -338,33 +388,9 @@ function buildChickenWorkbook(
     { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 40 },
   ];
 
-  // Summary: carton counts primary; set rows spell out cartons × set weight.
-  const rows = chickenByProduct(entries, {});
-  const summary: (string | number)[][] = [
-    ['Fresh Chicken count (carton tally — not a formal receival)'],
-    ['Counted by', meta.scannedBy || '—'],
-    ['Date/time', formatDateTime(meta.when)],
-    [],
-    ['Product', 'Type', 'GTIN', 'Cartons', 'Set wt (kg/ctn)', 'Weight (kg)'],
-  ];
-  for (const r of rows) {
-    summary.push([
-      r.product || '(unnamed)',
-      r.type === 'set' ? 'Set weight' : 'Random weight',
-      r.gtin,
-      r.cartons,
-      r.type === 'set' && r.setKg != null ? r.setKg : '',
-      r.kg,
-    ]);
-  }
-  summary.push([]);
-  summary.push(['TOTAL', '', '', entries.length, '', chickenTotalKg(entries, {})]);
-  const wsSummary = XLSX.utils.aoa_to_sheet(summary);
-  wsSummary['!cols'] = [{ wch: 30 }, { wch: 14 }, { wch: 16 }, { wch: 9 }, { wch: 14 }, { wch: 12 }];
-
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, wsCartons, 'Cartons');
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+  XLSX.utils.book_append_sheet(wb, wsCartons, 'Cartons');
   return wb;
 }
 
