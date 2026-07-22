@@ -707,6 +707,10 @@ export default function App() {
     (entry: ChickenEntry) => setChickenEntries((prev) => [...prev, entry]),
     [setChickenEntries],
   );
+  const chickenAddMany = useCallback(
+    (list: ChickenEntry[]) => setChickenEntries((prev) => [...prev, ...list]),
+    [setChickenEntries],
+  );
   const chickenRemove = useCallback(
     (id: string) => setChickenEntries((prev) => prev.filter((e) => e.id !== id)),
     [setChickenEntries],
@@ -858,6 +862,7 @@ export default function App() {
         scannedBy={scannedBy}
         entries={chickenEntries}
         onAdd={chickenAdd}
+        onAddMany={chickenAddMany}
         onRemove={chickenRemove}
         onClear={chickenClear}
         onDiscard={chickenDiscard}

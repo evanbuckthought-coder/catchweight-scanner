@@ -12,6 +12,7 @@ import {
   loadChickenPacks,
   loadSavedChickenCounts,
   materializeEntries,
+  palletCopies,
   removeChickenPack,
   removeSavedChickenCount,
   resolveChickenScan,
@@ -200,6 +201,44 @@ describe('derived totals — cartons × set weight', () => {
   it('materializeEntries bakes the derived kg in (stable saves/exports)', () => {
     const m = materializeEntries([entry({ weightKg: 999 })], setPacks);
     expect(m[0].weightKg).toBe(10);
+  });
+});
+
+describe('whole pallet — one scan, typed carton count', () => {
+  it('random-weight pallet: copies record the scanned weight as an ESTIMATE, no serial', () => {
+    const scan = resolveChickenScan(parseGS1(LABELS.vdbRandom), [], {});
+    if (scan.kind !== 'counted') throw new Error('expected counted');
+    const copies = palletCopies(scan.entry, 42);
+    expect(copies).toHaveLength(41); // scanned carton already counted
+    expect(copies[0]).toMatchObject({
+      gtin: scan.entry.gtin,
+      weightKg: 8.73,
+      weightSource: 'estimate',
+      productionDate: '2026-07-17',
+      bestBefore: '2026-07-29',
+      raw: '',
+    });
+    expect(copies[0].serial).toBeUndefined(); // the serial belongs to the scanned carton
+    expect(new Set(copies.map((c) => c.id)).size).toBe(41);
+    // A later scan of the SAME carton still trips the duplicate check.
+    const again = resolveChickenScan(parseGS1(LABELS.vdbRandom), [scan.entry, ...copies], {});
+    expect(again.kind).toBe('duplicate');
+    // Totals: 42 × 8.73, estimates counting as random-weight kg.
+    expect(chickenTotalKg([scan.entry, ...copies], {})).toBeCloseTo(366.66, 2);
+    const row = chickenByProduct([scan.entry, ...copies], {})[0];
+    expect(row).toMatchObject({ type: 'random', cartons: 42, estimated: 41 });
+  });
+
+  it('set-weight pallet: copies stay set entries — kg keeps deriving from the profile', () => {
+    upsertChickenPack(wingsProfile);
+    const scan = resolveChickenScan(parseGS1(LABELS.inghamWings), []);
+    if (scan.kind !== 'counted') throw new Error('expected counted');
+    const all = [scan.entry, ...palletCopies(scan.entry, 42)];
+    expect(all.every((e) => e.weightSource === 'set')).toBe(true);
+    expect(chickenTotalKg(all)).toBe(420); // 42 × 10
+    // Edit the set weight afterwards -> the whole pallet re-derives.
+    upsertChickenPack({ ...wingsProfile, packKg: 12 });
+    expect(chickenTotalKg(all)).toBe(504);
   });
 });
 

@@ -37,11 +37,13 @@ export interface ChickenEntry {
   weightKg: number;
   /**
    * 'barcode' = actual weight read from the barcode (random-weight product);
-   * 'set' = counted carton of a set-weight product (kg derived from profile).
+   * 'set' = counted carton of a set-weight product (kg derived from profile);
+   * 'estimate' = un-scanned carton of a random-weight PALLET — records the
+   * scanned carton's weight as an estimate (flagged in the export).
    * 'pack' / 'none' are legacy spellings of 'set' from the first release,
    * still present in stored counts — treated as 'set'.
    */
-  weightSource: 'barcode' | 'set' | 'pack' | 'none';
+  weightSource: 'barcode' | 'set' | 'estimate' | 'pack' | 'none';
   productionDate?: string;
   bestBefore?: string;
   useBy?: string;
@@ -50,9 +52,10 @@ export interface ChickenEntry {
   raw: string;
 }
 
-/** Is this entry a set-weight carton (any spelling, incl. legacy)? */
+/** Is this entry a set-weight carton (any spelling, incl. legacy)? Barcode
+ *  and estimate entries belong to random-weight products. */
 function isSetEntry(e: ChickenEntry): boolean {
-  return e.weightSource !== 'barcode';
+  return e.weightSource !== 'barcode' && e.weightSource !== 'estimate';
 }
 
 /** Per-GTIN chicken product profile (the teach output). */
@@ -156,6 +159,8 @@ export interface ChickenProductRow {
   kg: number;
   /** The per-carton set weight ('set' rows; null = count-only). */
   setKg: number | null;
+  /** Un-scanned pallet cartons whose kg is an estimate ('random' rows). */
+  estimated: number;
 }
 
 /** Per-product breakdown (cartons primary, kg derived/summed), first-seen order. */
@@ -176,8 +181,10 @@ export function chickenByProduct(
         cartons: 0,
         kg: 0,
         setKg: set ? (p?.type === 'set' ? p.packKg : e.weightKg || null) : null,
+        estimated: 0,
       };
     row.cartons += 1;
+    if (e.weightSource === 'estimate') row.estimated += 1;
     row.kg = roundKg(row.kg + roundKg(entryKg(e, packs)));
     if (!row.product && e.product) row.product = e.product;
     map.set(e.gtin, row);
@@ -289,6 +296,29 @@ export function entryFromPack(parsed: ParsedCarton, pack: ChickenPackProfile): C
   };
 }
 
+/**
+ * A whole pallet of one product: scan ONE carton, type the pallet's carton
+ * count — this builds the (count − 1) additional entries. Copies keep the
+ * product/dates/batch but drop the serial and raw barcode (those belong to
+ * the physically scanned carton, and a copied serial would trip the duplicate
+ * check). A random-weight copy records the scanned carton's weight as an
+ * ESTIMATE (flagged in the export); set-weight copies count and derive like
+ * any other set carton.
+ */
+export function palletCopies(scanned: ChickenEntry, palletCartons: number): ChickenEntry[] {
+  const copies: ChickenEntry[] = [];
+  for (let i = 1; i < palletCartons; i++) {
+    copies.push({
+      ...scanned,
+      id: uid(),
+      serial: undefined,
+      raw: '',
+      weightSource: scanned.weightSource === 'barcode' ? 'estimate' : scanned.weightSource,
+    });
+  }
+  return copies;
+}
+
 // --- export -----------------------------------------------------------------
 
 function formatDateTime(iso: string): string {
@@ -301,7 +331,9 @@ function formatDateTime(iso: string): string {
 /** How a carton's kg was arrived at — spelled out so a reader of the sheet
  *  knows which weights were actually weighed vs counted-as-nominal. */
 function sourceLabel(e: ChickenEntry): string {
-  return isSetEntry(e) ? 'Nominal (set weight)' : 'Actual (from barcode)';
+  if (e.weightSource === 'barcode') return 'Actual (from barcode)';
+  if (e.weightSource === 'estimate') return 'Estimated (pallet — copied from scanned carton)';
+  return 'Nominal (set weight)';
 }
 
 /** The stock-rotation date a carton's barcode carries: best-before / use-by
@@ -339,7 +371,11 @@ export function buildChickenWorkbook(
       r.gtin,
       r.product || '(unnamed)',
       r.type === 'set' ? r.cartons : r.kg,
-      r.type === 'set' ? 'cartons (set weight)' : 'kg (random weight)',
+      r.type === 'set'
+        ? 'cartons (set weight)'
+        : r.estimated > 0
+          ? `kg (random weight — ${r.estimated} of ${r.cartons} ctn estimated)`
+          : 'kg (random weight)',
       dates[0] ?? '',
       dates[dates.length - 1] ?? '',
     ]);

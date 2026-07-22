@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScannerView } from './ScannerView';
 import { ChickenPackSheet } from './ChickenPackSheet';
+import { ChickenPalletSheet } from './ChickenPalletSheet';
 import { ChickenTeachFlow } from './ChickenTeachFlow';
 import { parseGS1, type ParsedCarton } from '../lib/gs1';
 import { getProfile } from '../lib/profiles';
@@ -14,6 +15,7 @@ import {
   exportChickenCount,
   loadChickenPacks,
   materializeEntries,
+  palletCopies,
   preloadXlsx,
   resolveChickenScan,
   upsertChickenPack,
@@ -25,6 +27,8 @@ interface ChickenCountScreenProps {
   scannedBy: string;
   entries: ChickenEntry[];
   onAdd: (entry: ChickenEntry) => void;
+  /** Bulk add (whole pallet) — one state update, not N. */
+  onAddMany: (entries: ChickenEntry[]) => void;
   onRemove: (id: string) => void;
   onClear: () => void;
   onDiscard: () => void;
@@ -50,6 +54,7 @@ export function ChickenCountScreen({
   scannedBy,
   entries,
   onAdd,
+  onAddMany,
   onRemove,
   onClear,
   onDiscard,
@@ -68,6 +73,10 @@ export function ChickenCountScreen({
     /** Count the carton that triggered the prompt once the label is taught. */
     countAfter?: ParsedCarton;
   } | null>(null);
+  /** The most recently counted carton — the anchor for "whole pallet". */
+  const [lastCounted, setLastCounted] = useState<ChickenEntry | null>(null);
+  /** Pallet sheet open for this scanned carton. */
+  const [pallet, setPallet] = useState<ChickenEntry | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
   const [emailNote, setEmailNote] = useState('');
@@ -80,6 +89,9 @@ export function ChickenCountScreen({
   const packs = loadChickenPacks();
   const total = chickenTotalKg(entries, packs);
   const byProduct = chickenByProduct(entries, packs);
+  // "Whole pallet" anchors on the last counted carton — only while it's still
+  // in the list (removing it or resetting the count withdraws the offer).
+  const palletAnchor = lastCounted && entries.some((x) => x.id === lastCounted.id) ? lastCounted : null;
 
   useEffect(() => preloadXlsx(), []);
 
@@ -125,6 +137,7 @@ export function ChickenCountScreen({
             ? { ...outcome.entry, product: getProfile(outcome.entry.gtin)?.productName ?? '' }
             : outcome.entry;
         onAdd(e);
+        setLastCounted(e);
         signalSuccess();
         // Cartons are the primary figure — lead with the count.
         if (e.weightSource === 'barcode') {
@@ -154,7 +167,9 @@ export function ChickenCountScreen({
       updatedAt: new Date().toISOString(),
     };
     upsertChickenPack(profile);
-    onAdd(entryFromPack(pending.parsed, profile));
+    const entry = entryFromPack(pending.parsed, profile);
+    onAdd(entry);
+    setLastCounted(entry);
     signalSuccess();
     setFeedback({
       text:
@@ -229,7 +244,9 @@ export function ChickenCountScreen({
             ? p.setKg != null
               ? `${p.cartons} × ${p.setKg} kg set weight`
               : 'count only — no kg'
-            : 'weighed per carton'}
+            : p.estimated > 0
+              ? `weighed per carton · ${p.estimated} estimated (pallet)`
+              : 'weighed per carton'}
         </span>
         <span className="font-mono tabular-nums text-emerald-400">{p.kg.toFixed(2)} kg</span>
       </div>
@@ -368,7 +385,7 @@ export function ChickenCountScreen({
 
       <ScannerView
         active
-        paused={!!pending || !!teaching}
+        paused={!!pending || !!teaching || !!pallet}
         mode="barcode"
         onDecode={handleDecode}
         onOcrRead={() => {}}
@@ -385,6 +402,20 @@ export function ChickenCountScreen({
         >
           {feedback.text}
         </div>
+      )}
+
+      {palletAnchor && !pending && !teaching && !pallet && (
+        <button
+          type="button"
+          data-testid="chicken-pallet-open"
+          onClick={() => {
+            sheetGateRef.current = true;
+            setPallet(palletAnchor);
+          }}
+          className="rounded-xl bg-indigo-500/15 px-3 py-2.5 text-sm font-semibold text-indigo-300 ring-1 ring-indigo-500/40 active:bg-indigo-500/25"
+        >
+          🎯 Whole pallet of {palletAnchor.product || `GTIN ${palletAnchor.gtin}`}? Enter carton count
+        </button>
       )}
 
       {byProduct.length > 0 && (
@@ -420,7 +451,13 @@ export function ChickenCountScreen({
                     <span className="text-slate-400">{e.product || `GTIN ${e.gtin}`}</span>
                   </div>
                   <div className="truncate text-[11px] text-slate-500">
-                    {isBarcode ? 'random wt' : kg > 0 ? 'set wt' : 'count only'}
+                    {isBarcode
+                      ? 'random wt'
+                      : e.weightSource === 'estimate'
+                        ? 'est. wt (pallet)'
+                        : kg > 0
+                          ? 'set wt'
+                          : 'count only'}
                     {e.bestBefore ? ` · BB ${e.bestBefore}` : ''}
                     {e.useBy ? ` · use by ${e.useBy}` : ''}
                     {e.serial ? ` · #${e.serial}` : ''}
@@ -487,6 +524,28 @@ export function ChickenCountScreen({
         </button>
       </div>
 
+      {pallet && (
+        <ChickenPalletSheet
+          entry={pallet}
+          packs={packs}
+          onConfirm={(totalCartons) => {
+            const copies = palletCopies(pallet, totalCartons);
+            onAddMany(copies);
+            signalSuccess();
+            setFeedback({
+              text: `+${copies.length} cartons · ${pallet.product || `GTIN ${pallet.gtin}`} (${totalCartons} ctn on pallet)`,
+              ok: true,
+            });
+            setPallet(null);
+            sheetGateRef.current = false;
+          }}
+          onCancel={() => {
+            setPallet(null);
+            sheetGateRef.current = false;
+          }}
+        />
+      )}
+
       {pending && !teaching && (
         <ChickenPackSheet
           gtin={pending.gtin}
@@ -508,7 +567,9 @@ export function ChickenCountScreen({
           onSaved={(profile) => {
             // Learned mid-count: count the carton that raised the prompt.
             if (teaching.countAfter && profile.type === 'set') {
-              onAdd(entryFromPack(teaching.countAfter, profile));
+              const entry = entryFromPack(teaching.countAfter, profile);
+              onAdd(entry);
+              setLastCounted(entry);
               signalSuccess();
               setFeedback({
                 text: `✓ Carton counted · ${profile.product}${
