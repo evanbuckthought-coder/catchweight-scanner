@@ -10,11 +10,15 @@ import {
   chickenByProduct,
   chickenTotalKg,
   entryFromPack,
+  entryKg,
   exportChickenCount,
+  loadChickenPacks,
+  materializeEntries,
   preloadXlsx,
   resolveChickenScan,
   upsertChickenPack,
   type ChickenEntry,
+  type ChickenProductRow,
 } from '../lib/chicken';
 
 interface ChickenCountScreenProps {
@@ -34,10 +38,12 @@ interface ChickenCountScreenProps {
 const REPEAT_WINDOW_MS = 3000;
 
 /**
- * Fresh Chicken — a standalone carton/weight tally for chicken barcodes.
- * Random-weight labels (net weight in the barcode) count instantly; set-weight
- * labels ask for the carton weight once per product, then count automatically.
- * Everything the barcode carries (GTIN, dates, batch, serial) is recorded.
+ * Fresh Chicken — a standalone carton tally for chicken barcodes.
+ * Random-weight labels (net weight in the barcode) capture each carton's
+ * actual weight; set-weight products COUNT CARTONS — the set weight is taught
+ * once and kg is DERIVED (cartons × set weight), so editing the set weight in
+ * Label Intelligence updates the totals. Everything the barcode carries
+ * (GTIN, dates, batch, serial) is recorded.
  * No PO / supplier / pallets — finish with Discard / Save / Email.
  */
 export function ChickenCountScreen({
@@ -69,8 +75,11 @@ export function ChickenCountScreen({
   /** Set synchronously so two decodes in one frame can't both open the sheet. */
   const sheetGateRef = useRef(false);
 
-  const total = chickenTotalKg(entries);
-  const byProduct = chickenByProduct(entries);
+  // Loaded per render so a set weight edited in Label Intelligence flows
+  // straight into the derived totals (set kg = cartons × current set weight).
+  const packs = loadChickenPacks();
+  const total = chickenTotalKg(entries, packs);
+  const byProduct = chickenByProduct(entries, packs);
 
   useEffect(() => preloadXlsx(), []);
 
@@ -117,13 +126,19 @@ export function ChickenCountScreen({
             : outcome.entry;
         onAdd(e);
         signalSuccess();
-        setFeedback({
-          text:
-            e.weightSource === 'none'
-              ? `+ 1 carton${e.product ? ` · ${e.product}` : ''}`
-              : `+ ${roundKg(e.weightKg).toFixed(2)} kg${e.weightSource === 'pack' ? ' (pack)' : ''}`,
-          ok: true,
-        });
+        // Cartons are the primary figure — lead with the count.
+        if (e.weightSource === 'barcode') {
+          setFeedback({
+            text: `+1 carton · ${roundKg(e.weightKg).toFixed(2)} kg${e.product ? ` · ${e.product}` : ''}`,
+            ok: true,
+          });
+        } else {
+          const ctns = entries.filter((x) => x.gtin === e.gtin).length + 1;
+          setFeedback({
+            text: `✓ Carton counted · ${e.product || `GTIN ${e.gtin}`} (${ctns} ctn)`,
+            ok: true,
+          });
+        }
         return;
       }
     }
@@ -131,12 +146,21 @@ export function ChickenCountScreen({
 
   const savePack = (product: string, packKg: number | null) => {
     if (!pending) return;
-    const profile = { gtin: pending.gtin, product, packKg, updatedAt: new Date().toISOString() };
+    const profile = {
+      gtin: pending.gtin,
+      product,
+      type: 'set' as const,
+      packKg,
+      updatedAt: new Date().toISOString(),
+    };
     upsertChickenPack(profile);
     onAdd(entryFromPack(pending.parsed, profile));
     signalSuccess();
     setFeedback({
-      text: packKg == null ? `+ 1 carton (count only)` : `+ ${packKg.toFixed(2)} kg (pack weight saved)`,
+      text:
+        packKg == null
+          ? `✓ Carton counted (count only — no kg)`
+          : `✓ Carton counted · set weight saved (${packKg} kg/ctn)`,
       ok: true,
     });
     setPending(null);
@@ -147,7 +171,12 @@ export function ChickenCountScreen({
     if (entries.length === 0) return;
     setEmailNote('Preparing…');
     try {
-      const res = await exportChickenCount(entries, { scannedBy, when: new Date().toISOString() });
+      // Bake the derived set-weight kg in, so the emailed sheet is a stable
+      // snapshot of what was on screen.
+      const res = await exportChickenCount(materializeEntries(entries, packs), {
+        scannedBy,
+        when: new Date().toISOString(),
+      });
       setEmailNote(
         res === 'shared'
           ? 'Handed to the share sheet.'
@@ -171,13 +200,40 @@ export function ChickenCountScreen({
           <span className="ml-1 text-lg text-slate-400">ctn</span>
         </div>
         <div>
-          <span data-testid="chicken-total" className="font-mono text-4xl font-bold tabular-nums text-emerald-400">
+          <span data-testid="chicken-total" className="font-mono text-3xl font-bold tabular-nums text-emerald-400">
             {total.toFixed(2)}
           </span>
-          <span className="ml-1 text-lg text-slate-400">kg</span>
+          <span className="ml-1 text-base text-slate-400">kg</span>
         </div>
       </div>
     </div>
+  );
+
+  /** Per-product breakdown — cartons primary, kg derived for set / summed for random. */
+  const productRow = (p: ChickenProductRow) => (
+    <li key={p.gtin} className="rounded-xl bg-slate-800/70 px-3 py-2 ring-1 ring-slate-700">
+      <div className="flex items-center gap-2 text-sm">
+        <span
+          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+            p.type === 'set' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-sky-500/20 text-sky-300'
+          }`}
+        >
+          {p.type === 'set' ? 'SET' : 'RANDOM'}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-slate-200">{p.product || `GTIN ${p.gtin}`}</span>
+        <span className="shrink-0 font-mono font-bold tabular-nums text-amber-300">{p.cartons} ctn</span>
+      </div>
+      <div className="mt-0.5 flex items-center justify-between text-xs">
+        <span className="text-slate-500">
+          {p.type === 'set'
+            ? p.setKg != null
+              ? `${p.cartons} × ${p.setKg} kg set weight`
+              : 'count only — no kg'
+            : 'weighed per carton'}
+        </span>
+        <span className="font-mono tabular-nums text-emerald-400">{p.kg.toFixed(2)} kg</span>
+      </div>
+    </li>
   );
 
   const header = (
@@ -228,17 +284,7 @@ export function ChickenCountScreen({
         {runningTotal}
 
         {byProduct.length > 0 && (
-          <ul className="flex flex-col gap-1.5">
-            {byProduct.map((p) => (
-              <li key={p.gtin} className="flex items-center gap-2 rounded-xl bg-slate-800/70 px-3 py-2 text-sm ring-1 ring-slate-700">
-                <span className="min-w-0 flex-1 truncate text-slate-200">
-                  {p.product || `GTIN ${p.gtin}`}
-                </span>
-                <span className="shrink-0 font-mono tabular-nums text-amber-300">{p.cartons} ctn</span>
-                <span className="shrink-0 font-mono tabular-nums text-emerald-400">{p.kg.toFixed(2)} kg</span>
-              </li>
-            ))}
-          </ul>
+          <ul className="flex flex-col gap-1.5">{byProduct.map(productRow)}</ul>
         )}
 
         {emailNote && (
@@ -343,27 +389,25 @@ export function ChickenCountScreen({
 
       {byProduct.length > 0 && (
         <ul data-testid="chicken-by-product" className="flex flex-col gap-1.5">
-          {byProduct.map((p) => (
-            <li key={p.gtin} className="flex items-center gap-2 rounded-xl bg-slate-800/70 px-3 py-2 text-sm ring-1 ring-slate-700">
-              <span className="min-w-0 flex-1 truncate text-slate-200">{p.product || `GTIN ${p.gtin}`}</span>
-              <span className="shrink-0 font-mono tabular-nums text-amber-300">{p.cartons} ctn</span>
-              <span className="shrink-0 font-mono tabular-nums text-emerald-400">{p.kg.toFixed(2)} kg</span>
-            </li>
-          ))}
+          {byProduct.map(productRow)}
         </ul>
       )}
 
       {entries.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
-          Scan a chicken carton barcode — the GS1 one starting (01). Random-weight cartons count
-          straight away; a set-weight product asks its carton weight once.
+          Scan a chicken carton barcode — the GS1 one starting (01). Set-weight products count
+          cartons (kg is worked out from the set weight); random-weight cartons capture their
+          actual weight.
         </div>
       ) : (
         <ul data-testid="chicken-list" className="flex flex-col gap-1.5">
           {entries
             .slice()
             .reverse()
-            .map((e, i) => (
+            .map((e, i) => {
+              const kg = entryKg(e, packs);
+              const isBarcode = e.weightSource === 'barcode';
+              return (
               <li key={e.id} className="flex items-center gap-3 rounded-xl bg-slate-800/70 px-3 py-2 ring-1 ring-slate-700">
                 <span className="w-6 shrink-0 text-right font-mono text-xs text-slate-500">
                   {entries.length - i}
@@ -371,12 +415,12 @@ export function ChickenCountScreen({
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm text-slate-100">
                     <span className="font-mono font-semibold tabular-nums">
-                      {e.weightSource === 'none' ? '— ' : `${roundKg(e.weightKg).toFixed(2)} kg `}
+                      {kg > 0 ? `${roundKg(kg).toFixed(2)} kg ` : '— '}
                     </span>
                     <span className="text-slate-400">{e.product || `GTIN ${e.gtin}`}</span>
                   </div>
                   <div className="truncate text-[11px] text-slate-500">
-                    {e.weightSource === 'barcode' ? 'random wt' : e.weightSource === 'pack' ? 'set wt' : 'count only'}
+                    {isBarcode ? 'random wt' : kg > 0 ? 'set wt' : 'count only'}
                     {e.bestBefore ? ` · BB ${e.bestBefore}` : ''}
                     {e.useBy ? ` · use by ${e.useBy}` : ''}
                     {e.serial ? ` · #${e.serial}` : ''}
@@ -392,7 +436,8 @@ export function ChickenCountScreen({
                   ✕
                 </button>
               </li>
-            ))}
+              );
+            })}
         </ul>
       )}
 
@@ -459,16 +504,16 @@ export function ChickenCountScreen({
         <ChickenTeachFlow
           initialGtin={teaching.gtin}
           initialParsed={teaching.parsed}
+          initialType={teaching.gtin ? 'set' : undefined}
           onSaved={(profile) => {
             // Learned mid-count: count the carton that raised the prompt.
-            if (teaching.countAfter) {
+            if (teaching.countAfter && profile.type === 'set') {
               onAdd(entryFromPack(teaching.countAfter, profile));
               signalSuccess();
               setFeedback({
-                text:
-                  profile.packKg == null
-                    ? `+ 1 carton · ${profile.product}`
-                    : `+ ${profile.packKg.toFixed(2)} kg · ${profile.product}`,
+                text: `✓ Carton counted · ${profile.product}${
+                  profile.packKg != null ? ` (${profile.packKg} kg/ctn)` : ''
+                }`,
                 ok: true,
               });
             } else {

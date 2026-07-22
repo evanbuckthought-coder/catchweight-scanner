@@ -14,9 +14,9 @@ interface ChickenPackSheetProps {
 
 /**
  * First scan of a SET-WEIGHT chicken product: its barcode carries no weight
- * AI, so the carton (pack) weight is captured ONCE here — usually the printed
- * pack size, e.g. 10 kg — then remembered per GTIN and applied automatically
- * to every later scan of that product.
+ * AI, so this is a count-by-carton line. The set weight is entered ONCE here
+ * (usually the printed pack size, e.g. 10 kg), saved on the GTIN profile, and
+ * every later scan just COUNTS THE CARTON — kg is derived, never re-asked.
  */
 export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel }: ChickenPackSheetProps) {
   const [product, setProduct] = useState('');
@@ -39,11 +39,12 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel
       >
         <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-600" />
 
-        <h2 className="text-lg font-bold text-slate-100">New product — set carton weight</h2>
+        <h2 className="text-lg font-bold text-slate-100">New set-weight product</h2>
         <p className="mt-1 text-sm text-slate-400">
-          This barcode carries no weight (a set-weight carton), so tell the app what one carton
-          weighs. It’s asked <span className="font-semibold text-slate-200">once</span> — every later
-          scan of this product counts automatically.
+          This barcode carries no weight — a set-weight line, counted{' '}
+          <span className="font-semibold text-slate-200">by carton</span>. Enter the set weight{' '}
+          <span className="font-semibold text-slate-200">once</span>; every later scan just counts
+          the carton and kg is worked out from the count.
         </p>
 
         <div className="mt-3 rounded-xl bg-slate-800/70 px-3 py-2 text-xs text-slate-400 ring-1 ring-slate-700">
@@ -81,7 +82,7 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel
         </label>
 
         <label className="mt-3 block text-sm font-medium text-slate-300">
-          Carton weight (kg) *
+          Set weight (kg per carton) *
           <input
             data-testid="chicken-pack-weight"
             value={weight}
@@ -100,7 +101,7 @@ export function ChickenPackSheet({ gtin, parsed, onSave, onTeachWithAi, onCancel
           onClick={() => onSave(product.trim(), kg)}
           className="mt-4 h-14 w-full rounded-xl bg-emerald-500 text-lg font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
         >
-          Save weight &amp; count carton
+          Save set weight — count this carton
         </button>
 
         <button

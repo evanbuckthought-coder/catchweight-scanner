@@ -3,15 +3,16 @@
  * outside the formal receival flow (like Quick Count, but capturing everything
  * the barcode offers).
  *
- * Two label families in the field:
- *  - RANDOM weight (e.g. Van den Brink): full GS1-128 carrying a net weight
- *    AI (310n/320n) — the weight comes straight off the barcode.
- *  - SET weight (e.g. Ingham/PPH "FS CKN"): GS1-128 with GTIN + use-by ONLY,
- *    no weight AI at all. The carton weight is LEARNED once per GTIN (the
- *    printed pack size, e.g. 10 kg) and auto-applied to every later scan.
- *
- * A pack profile may deliberately carry packKg = null, meaning "count this
- * product's cartons but don't add kg".
+ * Two product types, chosen when teaching:
+ *  - RANDOM weight (e.g. Van den Brink): weight varies per carton and the
+ *    GS1-128 barcode carries it (AI 310n/320n). Each scan captures the
+ *    carton's ACTUAL weight.
+ *  - SET weight (e.g. Ingham/PPH "FS CKN"): every carton of the product is
+ *    the same weight and the barcode carries none. Scanning COUNTS CARTONS;
+ *    kg is DERIVED as cartons × the product's saved set weight. The set
+ *    weight is entered once, lives on the GTIN profile, and editing it
+ *    (Label Intelligence) updates derived totals for the active count.
+ *    packKg = null means "count this product's cartons, no kg".
  */
 
 import type * as XLSXType from 'xlsx';
@@ -25,13 +26,22 @@ export interface ChickenEntry {
   id: string;
   time: string;
   gtin: string;
-  /** Product name from the learned pack profile ('' if never named). */
+  /** Product name from the profile ('' if never taught/named). */
   product: string;
-  /** Net kg counted (0 when the product is deliberately count-only). */
+  /**
+   * For 'barcode' entries: the carton's actual scanned weight (authoritative).
+   * For 'set' entries: a fallback snapshot only — live totals DERIVE the kg
+   * from the profile's current set weight (see entryKg), so an edited set
+   * weight flows through; this snapshot covers a later-deleted profile.
+   */
   weightKg: number;
-  /** Where the weight came from — the barcode itself, a learned pack weight,
-   *  or 'none' for a count-only product. */
-  weightSource: 'barcode' | 'pack' | 'none';
+  /**
+   * 'barcode' = actual weight read from the barcode (random-weight product);
+   * 'set' = counted carton of a set-weight product (kg derived from profile).
+   * 'pack' / 'none' are legacy spellings of 'set' from the first release,
+   * still present in stored counts — treated as 'set'.
+   */
+  weightSource: 'barcode' | 'set' | 'pack' | 'none';
   productionDate?: string;
   bestBefore?: string;
   useBy?: string;
@@ -40,16 +50,26 @@ export interface ChickenEntry {
   raw: string;
 }
 
-/** Learned per-GTIN carton weight for set-weight lines. */
+/** Is this entry a set-weight carton (any spelling, incl. legacy)? */
+function isSetEntry(e: ChickenEntry): boolean {
+  return e.weightSource !== 'barcode';
+}
+
+/** Per-GTIN chicken product profile (the teach output). */
 export interface ChickenPackProfile {
   gtin: string;
   product: string;
-  /** Carton weight in kg, or null for "count cartons only, no kg". */
+  /**
+   * 'set': every carton identical — count cartons, derive kg from packKg.
+   * 'random': weight varies per carton — each scan uses the barcode weight.
+   */
+  type: 'set' | 'random';
+  /** Set weight per carton in kg ('set' only); null = count cartons, no kg. */
   packKg: number | null;
   updatedAt: string;
 }
 
-/** A chicken count saved to the device. */
+/** A chicken count saved to the device (entries materialized at save time). */
 export interface SavedChickenCount {
   id: string;
   savedAt: string;
@@ -59,29 +79,18 @@ export interface SavedChickenCount {
   entries: ChickenEntry[];
 }
 
-export function chickenTotalKg(entries: ChickenEntry[]): number {
-  return roundKg(entries.reduce((sum, e) => sum + roundKg(e.weightKg), 0));
-}
-
-/** Per-product breakdown (cartons + kg), in first-seen order. */
-export function chickenByProduct(
-  entries: ChickenEntry[],
-): Array<{ gtin: string; product: string; cartons: number; kg: number }> {
-  const map = new Map<string, { gtin: string; product: string; cartons: number; kg: number }>();
-  for (const e of entries) {
-    const row = map.get(e.gtin) ?? { gtin: e.gtin, product: e.product, cartons: 0, kg: 0 };
-    row.cartons += 1;
-    row.kg = roundKg(row.kg + roundKg(e.weightKg));
-    if (!row.product && e.product) row.product = e.product;
-    map.set(e.gtin, row);
-  }
-  return [...map.values()];
-}
-
-// --- learned pack weights ---------------------------------------------------
+// --- profiles ---------------------------------------------------------------
 
 export function loadChickenPacks(): Record<string, ChickenPackProfile> {
-  return loadJSON<Record<string, ChickenPackProfile>>(STORAGE_KEYS.chickenPacks, {});
+  const all = loadJSON<Record<string, ChickenPackProfile>>(STORAGE_KEYS.chickenPacks, {});
+  // First-release profiles carried no `type`. packKg != null was only ever a
+  // set weight -> 'set'. A null packKg was ambiguous (random product, or
+  // set count-only) -> 'random' self-heals: a set product re-prompts on its
+  // next scan (no barcode weight -> needs-pack), a random one just works.
+  for (const p of Object.values(all)) {
+    p.type ??= p.packKg != null ? 'set' : 'random';
+  }
+  return all;
 }
 
 export function getChickenPack(gtin: string): ChickenPackProfile | undefined {
@@ -102,6 +111,80 @@ export function removeChickenPack(gtin: string): Record<string, ChickenPackProfi
   return all;
 }
 
+// --- derivation -------------------------------------------------------------
+
+/**
+ * An entry's kg contribution. Barcode entries carry their own (actual)
+ * weight; set entries derive from the profile's CURRENT set weight so edits
+ * flow through, falling back to the entry's snapshot if the profile is gone.
+ */
+export function entryKg(
+  e: ChickenEntry,
+  packs: Record<string, ChickenPackProfile> = loadChickenPacks(),
+): number {
+  if (!isSetEntry(e)) return e.weightKg;
+  const p = packs[e.gtin];
+  if (p && p.type === 'set') return p.packKg ?? 0;
+  return e.weightKg ?? 0;
+}
+
+/** Total kg: actual weights + derived set-weight contributions. */
+export function chickenTotalKg(
+  entries: ChickenEntry[],
+  packs: Record<string, ChickenPackProfile> = loadChickenPacks(),
+): number {
+  return roundKg(entries.reduce((sum, e) => sum + roundKg(entryKg(e, packs)), 0));
+}
+
+/**
+ * Bake each entry's derived kg into weightKg. Used when a count leaves the
+ * live-derivation world (saving, exporting) so the record is self-contained
+ * and stable even if set weights are edited later.
+ */
+export function materializeEntries(
+  entries: ChickenEntry[],
+  packs: Record<string, ChickenPackProfile> = loadChickenPacks(),
+): ChickenEntry[] {
+  return entries.map((e) => ({ ...e, weightKg: roundKg(entryKg(e, packs)) }));
+}
+
+export interface ChickenProductRow {
+  gtin: string;
+  product: string;
+  type: 'set' | 'random';
+  cartons: number;
+  kg: number;
+  /** The per-carton set weight ('set' rows; null = count-only). */
+  setKg: number | null;
+}
+
+/** Per-product breakdown (cartons primary, kg derived/summed), first-seen order. */
+export function chickenByProduct(
+  entries: ChickenEntry[],
+  packs: Record<string, ChickenPackProfile> = loadChickenPacks(),
+): ChickenProductRow[] {
+  const map = new Map<string, ChickenProductRow>();
+  for (const e of entries) {
+    const set = isSetEntry(e);
+    const p = packs[e.gtin];
+    const row =
+      map.get(e.gtin) ??
+      {
+        gtin: e.gtin,
+        product: e.product,
+        type: set ? ('set' as const) : ('random' as const),
+        cartons: 0,
+        kg: 0,
+        setKg: set ? (p?.type === 'set' ? p.packKg : e.weightKg || null) : null,
+      };
+    row.cartons += 1;
+    row.kg = roundKg(row.kg + roundKg(entryKg(e, packs)));
+    if (!row.product && e.product) row.product = e.product;
+    map.set(e.gtin, row);
+  }
+  return [...map.values()];
+}
+
 // --- saved counts -----------------------------------------------------------
 
 export function loadSavedChickenCounts(): SavedChickenCount[] {
@@ -109,13 +192,15 @@ export function loadSavedChickenCounts(): SavedChickenCount[] {
 }
 
 export function saveChickenCount(entries: ChickenEntry[], scannedBy: string): SavedChickenCount {
+  const packs = loadChickenPacks();
+  const materialized = materializeEntries(entries, packs);
   const record: SavedChickenCount = {
     id: uid(),
     savedAt: new Date().toISOString(),
     scannedBy,
-    cartons: entries.length,
-    totalKg: chickenTotalKg(entries),
-    entries,
+    cartons: materialized.length,
+    totalKg: chickenTotalKg(materialized, packs),
+    entries: materialized,
   };
   saveJSON(STORAGE_KEYS.chickenCounts, [record, ...loadSavedChickenCounts()]);
   return record;
@@ -137,13 +222,14 @@ export type ScanOutcome =
 
 /**
  * Decide what a scanned chicken barcode should do. Pure — the caller owns
- * state. Rules:
+ * state. Rules, in order:
  *  - no GTIN -> not a GS1 carton barcode (these labels also carry a Lot ID
  *    and an internal code; only the (01)… one counts);
- *  - a serial (AI 21) that's already counted -> duplicate carton;
- *  - weight in the barcode -> count it straight away (random weight);
- *  - no weight + known pack profile -> count at the learned weight;
- *  - no weight + unknown GTIN -> ask for the pack weight once.
+ *  - a serial (AI 21) already counted -> duplicate carton;
+ *  - taught 'set' product -> COUNT THE CARTON (kg derives from the profile;
+ *    the user's choice wins even if the barcode happened to carry a weight);
+ *  - weight in the barcode -> actual weight, counts straight away (random);
+ *  - otherwise -> unknown set-weight product: ask for its set weight once.
  */
 export function resolveChickenScan(
   parsed: ParsedCarton,
@@ -159,7 +245,27 @@ export function resolveChickenScan(
     return { kind: 'duplicate', serial: parsed.serial };
   }
 
-  const base = {
+  const pack = packs[gtin];
+
+  if (pack?.type === 'set') {
+    return { kind: 'counted', entry: entryFromPack(parsed, pack) };
+  }
+
+  if (parsed.weightKg != null) {
+    const base = entryBase(parsed, gtin);
+    return {
+      kind: 'counted',
+      entry: { ...base, product: pack?.product ?? '', weightKg: parsed.weightKg, weightSource: 'barcode' },
+    };
+  }
+
+  // 'random' profile but no weight in this barcode -> the type is wrong for
+  // this label; re-prompt so it self-corrects (same path as unknown).
+  return { kind: 'needs-pack', parsed, gtin };
+}
+
+function entryBase(parsed: ParsedCarton, gtin: string) {
+  return {
     id: uid(),
     time: new Date().toISOString(),
     gtin,
@@ -170,43 +276,16 @@ export function resolveChickenScan(
     serial: parsed.serial,
     raw: parsed.raw,
   };
-
-  if (parsed.weightKg != null) {
-    return {
-      kind: 'counted',
-      entry: { ...base, product: packs[gtin]?.product ?? '', weightKg: parsed.weightKg, weightSource: 'barcode' },
-    };
-  }
-
-  const pack = packs[gtin];
-  if (!pack) return { kind: 'needs-pack', parsed, gtin };
-
-  return {
-    kind: 'counted',
-    entry: {
-      ...base,
-      product: pack.product,
-      weightKg: pack.packKg ?? 0,
-      weightSource: pack.packKg == null ? 'none' : 'pack',
-    },
-  };
 }
 
-/** Build a counted entry once a pack weight has just been supplied. */
+/** Build a counted carton of a set-weight product. */
 export function entryFromPack(parsed: ParsedCarton, pack: ChickenPackProfile): ChickenEntry {
   return {
-    id: uid(),
-    time: new Date().toISOString(),
-    gtin: pack.gtin,
+    ...entryBase(parsed, pack.gtin),
     product: pack.product,
+    // Snapshot only — live totals derive from the profile (see entryKg).
     weightKg: pack.packKg ?? 0,
-    weightSource: pack.packKg == null ? 'none' : 'pack',
-    productionDate: parsed.productionDate,
-    bestBefore: parsed.bestBefore,
-    useBy: parsed.useBy,
-    batch: parsed.batch,
-    serial: parsed.serial,
-    raw: parsed.raw,
+    weightSource: 'set',
   };
 }
 
@@ -219,28 +298,30 @@ function formatDateTime(iso: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-const SOURCE_LABEL: Record<ChickenEntry['weightSource'], string> = {
-  barcode: 'Barcode (random)',
-  pack: 'Pack weight (set)',
-  none: 'Count only',
-};
+/** How a carton's kg was arrived at — spelled out so a reader of the sheet
+ *  knows which weights were actually weighed vs counted-as-nominal. */
+function sourceLabel(e: ChickenEntry): string {
+  return isSetEntry(e) ? 'Nominal (set weight)' : 'Actual (from barcode)';
+}
 
 function buildChickenWorkbook(
   XLSX: typeof XLSXType,
   entries: ChickenEntry[],
   meta: { scannedBy: string; when: string },
 ): XLSXType.WorkBook {
+  // Entries are expected pre-materialized (weightKg final).
   const cartons: (string | number)[][] = [
-    ['#', 'Time', 'Product', 'GTIN', 'Weight (kg)', 'Weight source', 'Production date', 'Best before', 'Use by', 'Batch/Lot', 'Serial', 'Raw barcode'],
+    ['#', 'Time', 'Product', 'Type', 'GTIN', 'Weight (kg)', 'Weight basis', 'Production date', 'Best before', 'Use by', 'Batch/Lot', 'Serial', 'Raw barcode'],
   ];
   entries.forEach((e, i) => {
     cartons.push([
       i + 1,
       formatDateTime(e.time),
       e.product || '',
+      isSetEntry(e) ? 'Set' : 'Random',
       e.gtin,
       roundKg(e.weightKg),
-      SOURCE_LABEL[e.weightSource],
+      sourceLabel(e),
       e.productionDate ?? '',
       e.bestBefore ?? '',
       e.useBy ?? '',
@@ -250,27 +331,36 @@ function buildChickenWorkbook(
     ]);
   });
   cartons.push([]);
-  cartons.push(['TOTAL', '', '', `${entries.length} carton${entries.length === 1 ? '' : 's'}`, chickenTotalKg(entries)]);
+  cartons.push(['TOTAL', '', '', '', `${entries.length} carton${entries.length === 1 ? '' : 's'}`, chickenTotalKg(entries, {})]);
   const wsCartons = XLSX.utils.aoa_to_sheet(cartons);
   wsCartons['!cols'] = [
-    { wch: 5 }, { wch: 20 }, { wch: 26 }, { wch: 16 }, { wch: 11 }, { wch: 18 },
+    { wch: 5 }, { wch: 20 }, { wch: 26 }, { wch: 8 }, { wch: 16 }, { wch: 11 }, { wch: 20 },
     { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 40 },
   ];
 
+  // Summary: carton counts primary; set rows spell out cartons × set weight.
+  const rows = chickenByProduct(entries, {});
   const summary: (string | number)[][] = [
     ['Fresh Chicken count (carton tally — not a formal receival)'],
     ['Counted by', meta.scannedBy || '—'],
     ['Date/time', formatDateTime(meta.when)],
     [],
-    ['Product', 'GTIN', 'Cartons', 'Weight (kg)'],
+    ['Product', 'Type', 'GTIN', 'Cartons', 'Set wt (kg/ctn)', 'Weight (kg)'],
   ];
-  for (const row of chickenByProduct(entries)) {
-    summary.push([row.product || '(unnamed)', row.gtin, row.cartons, row.kg]);
+  for (const r of rows) {
+    summary.push([
+      r.product || '(unnamed)',
+      r.type === 'set' ? 'Set weight' : 'Random weight',
+      r.gtin,
+      r.cartons,
+      r.type === 'set' && r.setKg != null ? r.setKg : '',
+      r.kg,
+    ]);
   }
   summary.push([]);
-  summary.push(['TOTAL', '', entries.length, chickenTotalKg(entries)]);
+  summary.push(['TOTAL', '', '', entries.length, '', chickenTotalKg(entries, {})]);
   const wsSummary = XLSX.utils.aoa_to_sheet(summary);
-  wsSummary['!cols'] = [{ wch: 30 }, { wch: 16 }, { wch: 10 }, { wch: 12 }];
+  wsSummary['!cols'] = [{ wch: 30 }, { wch: 14 }, { wch: 16 }, { wch: 9 }, { wch: 14 }, { wch: 12 }];
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, wsCartons, 'Cartons');
@@ -283,6 +373,11 @@ export function preloadXlsx(): void {
   void import('xlsx').catch(() => {});
 }
 
+/**
+ * Export a count. Entries must already be materialized (saved counts are;
+ * for the ACTIVE count pass materializeEntries(entries) so exports are
+ * stable snapshots, not re-derived from whatever the profiles say later).
+ */
 export async function exportChickenCount(
   entries: ChickenEntry[],
   meta: { scannedBy: string; when: string },

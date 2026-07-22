@@ -11,23 +11,31 @@ interface ChickenTeachFlowProps {
   initialGtin?: string;
   /** The scan that triggered it — tells us if the barcode carries a weight. */
   initialParsed?: ParsedCarton;
+  /** Pre-decided product type (the first-scan prompt already knows it's set). */
+  initialType?: 'set' | 'random';
   onSaved: (profile: ChickenPackProfile) => void;
   onCancel: () => void;
 }
 
-type Step = 'scan' | 'photo' | 'review' | 'analysing' | 'confirm';
+type Step = 'type' | 'scan' | 'photo' | 'review' | 'analysing' | 'confirm';
 
 /**
- * Teach a chicken label with the AI, so counting is fast and named later.
+ * Teach a chicken product: choose its TYPE first, then identify it.
+ *
+ *  - SET weight: every carton identical — the set weight is entered by the
+ *    user ONCE and lives on the profile; scanning then counts cartons and kg
+ *    is derived. The AI photo read only suggests the description/pack size.
+ *  - RANDOM weight: the barcode carries each carton's weight; nothing to
+ *    enter beyond the description.
  *
  * The GTIN ALWAYS comes from a real barcode scan — never from the AI. Reading
  * barcode digits off a photo is the model's weakest skill (it fumbled a digit
  * on 2 of 3 test labels), and a profile keyed by a wrong GTIN would simply
- * never match when scanning. The AI is used for what it reads reliably: the
- * product description and the nominal pack size.
+ * never match when scanning.
  */
-export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel }: ChickenTeachFlowProps) {
-  const [step, setStep] = useState<Step>(initialGtin ? 'photo' : 'scan');
+export function ChickenTeachFlow({ initialGtin, initialParsed, initialType, onSaved, onCancel }: ChickenTeachFlowProps) {
+  const [type, setType] = useState<'set' | 'random'>(initialType ?? 'set');
+  const [step, setStep] = useState<Step>(initialGtin ? 'photo' : 'type');
   const [gtin, setGtin] = useState(initialGtin ?? '');
   const [parsed, setParsed] = useState<ParsedCarton | undefined>(initialParsed);
   const [image, setImage] = useState<CompressedLabelImage | null>(null);
@@ -39,7 +47,7 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
 
-  /** A barcode that carries its own weight needs no learned carton weight. */
+  /** Whether the scanned barcode carried its own weight (random-weight sign). */
   const barcodeHasWeight = parsed?.weightKg != null;
 
   const previewUrl = useMemo(
@@ -79,7 +87,9 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
       const r = await analyseLabel(image, 'This is a chicken carton label. I need the product description and the nominal carton/pack size.');
       setResult(r);
       setProduct(r.product.value?.trim() ?? '');
-      setPackKg(r.weight.nominalPackKg != null ? String(r.weight.nominalPackKg) : '');
+      if (type === 'set' && r.weight.nominalPackKg != null) {
+        setPackKg(String(r.weight.nominalPackKg));
+      }
       setStep('confirm');
     } catch (err) {
       setError(err instanceof TeachError ? err.message : 'Analysis failed — try again.');
@@ -94,9 +104,10 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
     const profile: ChickenPackProfile = {
       gtin,
       product: product.trim(),
-      // A weight-bearing barcode always wins at scan time, so no pack weight
-      // is stored for it; a set-weight line keeps the confirmed figure.
-      packKg: barcodeHasWeight ? null : Number.isFinite(kg) && kg > 0 ? kg : null,
+      type,
+      // The set weight is the USER-ENTERED value (AI only pre-filled the
+      // field); a random-weight product stores none — its barcode wins.
+      packKg: type === 'set' && Number.isFinite(kg) && kg > 0 ? kg : null,
       updatedAt: new Date().toISOString(),
     };
     upsertChickenPack(profile);
@@ -128,14 +139,55 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
     </div>
   );
 
+  // ---- 0. Choose the product type -------------------------------------------
+  if (step === 'type') {
+    return shell(
+      'Teach a chicken product',
+      <>
+        <p className="mt-1 text-sm text-slate-400">
+          First: does every carton of this product weigh the same?
+        </p>
+        <button
+          type="button"
+          data-testid="chicken-teach-type-set"
+          onClick={() => {
+            setType('set');
+            setStep('scan');
+          }}
+          className="mt-4 w-full rounded-xl bg-emerald-500 p-3.5 text-left active:bg-emerald-400"
+        >
+          <span className="block text-base font-bold text-slate-900">📦 Set weight</span>
+          <span className="block text-xs font-medium text-emerald-950/80">
+            Every carton identical (e.g. 10 kg wings). Scanning COUNTS CARTONS — you enter the set
+            weight once and kg is worked out from the count.
+          </span>
+        </button>
+        <button
+          type="button"
+          data-testid="chicken-teach-type-random"
+          onClick={() => {
+            setType('random');
+            setStep('scan');
+          }}
+          className="mt-2 w-full rounded-xl bg-sky-500 p-3.5 text-left active:bg-sky-400"
+        >
+          <span className="block text-base font-bold text-slate-900">⚖️ Random weight</span>
+          <span className="block text-xs font-medium text-sky-950/80">
+            Weight varies per carton and the barcode carries it — each scan captures the carton’s
+            actual weight.
+          </span>
+        </button>
+      </>,
+    );
+  }
+
   // ---- 1. Scan for the exact GTIN -------------------------------------------
   if (step === 'scan') {
     return shell(
-      'Teach a chicken label',
+      type === 'set' ? 'Scan a set-weight carton' : 'Scan a random-weight carton',
       <>
         <p className="mt-1 text-sm text-slate-400">
-          First scan the carton’s barcode — that gives the exact product code. Then photograph the
-          label and the AI reads its description and pack size.
+          Scan the carton’s barcode — that gives the exact product code.
         </p>
         <div className="mt-3">
           <ScannerView active paused={false} mode="barcode" onDecode={handleScan} onOcrRead={() => {}} />
@@ -145,18 +197,41 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
     );
   }
 
-  // ---- 2. Photograph the label ----------------------------------------------
+  // The scan tells us whether the type choice matches the barcode.
+  const typeMismatch =
+    type === 'random' && !barcodeHasWeight ? (
+      <div className="mt-3 rounded-xl bg-amber-500/10 p-3 ring-1 ring-amber-500/40">
+        <p className="text-sm text-amber-200">
+          This barcode carries <span className="font-bold">no weight</span> — random-weight cartons
+          normally do. If every carton of this product is the same weight, it’s a set-weight line.
+        </p>
+        <button
+          type="button"
+          data-testid="chicken-teach-switch-set"
+          onClick={() => setType('set')}
+          className="mt-2 h-10 w-full rounded-lg bg-amber-500 text-sm font-bold text-slate-900"
+        >
+          Switch to set weight
+        </button>
+      </div>
+    ) : type === 'set' && barcodeHasWeight ? (
+      <p className="mt-3 rounded-xl bg-slate-800/70 px-3 py-2 text-xs text-slate-400 ring-1 ring-slate-700">
+        Note: this barcode also carries a weight ({roundKg(parsed!.weightKg!).toFixed(2)} kg), but as
+        a set-weight product every carton will count at your set weight.
+      </p>
+    ) : null;
+
+  // ---- 2. Photograph the label (optional — AI fills the details) -------------
   if (step === 'photo') {
     return shell(
       'Photograph the label',
       <>
         <p className="mt-1 text-sm text-slate-400">
-          Barcode read — <span className="font-mono text-slate-200">GTIN {gtin}</span>
-          {barcodeHasWeight && (
-            <span className="text-emerald-300"> · carries its own weight ({roundKg(parsed!.weightKg!).toFixed(2)} kg)</span>
-          )}
-          . Now photograph the whole label.
+          Barcode read — <span className="font-mono text-slate-200">GTIN {gtin}</span>. Photograph the
+          label and the AI fills in the description{type === 'set' ? ' and suggests the set weight' : ''},
+          or skip and type it yourself.
         </p>
+        {typeMismatch}
         <input
           ref={cameraRef}
           type="file"
@@ -193,6 +268,14 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
           className="mt-2 h-12 w-full rounded-xl bg-slate-800 text-base font-semibold text-slate-200 ring-1 ring-slate-600"
         >
           🖼 Choose an existing photo
+        </button>
+        <button
+          type="button"
+          data-testid="chicken-teach-skip-photo"
+          onClick={() => setStep('confirm')}
+          className="mt-2 h-12 w-full rounded-xl bg-slate-800 text-base font-semibold text-slate-200 ring-1 ring-slate-600"
+        >
+          ⌨️ Skip — type it in myself
         </button>
         <p className="mt-2 text-xs text-slate-500">
           Analysing uses a paid AI call (a few cents) and needs internet — once per product.
@@ -247,12 +330,16 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
     'Confirm the product',
     <>
       <p className="mt-1 text-sm text-slate-400">
-        Check what the AI read, correct anything, then save. This is what shows when you scan.
+        {result
+          ? 'Check what the AI read, correct anything, then save. This is what shows when you scan.'
+          : 'Enter the product details — this is what shows when you scan.'}
       </p>
 
       <div className="mt-3 rounded-xl bg-slate-800/70 px-3 py-2 text-xs text-slate-400 ring-1 ring-slate-700">
-        GTIN <span className="font-mono text-slate-200">{gtin}</span> (from the scan — exact)
+        GTIN <span className="font-mono text-slate-200">{gtin}</span> (from the scan — exact) ·{' '}
+        {type === 'set' ? 'set weight — counted by carton' : 'random weight — weighed per carton'}
       </div>
+      {typeMismatch}
 
       <label className="mt-3 block text-sm font-medium text-slate-300">
         Product description *
@@ -265,14 +352,14 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
         />
       </label>
 
-      {barcodeHasWeight ? (
-        <p className="mt-3 rounded-xl bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200 ring-1 ring-emerald-500/40">
-          This barcode carries its own weight, so every carton counts at its exact scanned weight —
-          no carton weight needed.
+      {type === 'random' ? (
+        <p className="mt-3 rounded-xl bg-sky-500/10 px-3 py-2 text-sm text-sky-200 ring-1 ring-sky-500/40">
+          Random weight — every scan captures the carton’s actual weight from its barcode. Nothing
+          else to enter.
         </p>
       ) : (
         <label className="mt-3 block text-sm font-medium text-slate-300">
-          Carton weight (kg) — set-weight line
+          Set weight (kg per carton) *
           <input
             data-testid="chicken-teach-packkg"
             value={packKg}
@@ -282,13 +369,16 @@ export function ChickenTeachFlow({ initialGtin, initialParsed, onSaved, onCancel
             className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-2xl font-bold tabular-nums text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
           />
           <span className="mt-1 block text-xs text-slate-500">
-            {result?.weight.nominalPackKg != null
-              ? `AI read the pack size as ${result.weight.nominalPackKg} kg`
-              : 'AI found no pack size on the label — enter it from the description.'}
-            {printedNet ? ` · printed net weight on this carton: ${printedNet}` : ''}
+            {result
+              ? result.weight.nominalPackKg != null
+                ? `AI read the pack size as ${result.weight.nominalPackKg} kg — confirm it’s right.`
+                : 'AI found no pack size on the label — enter it from the description.'
+              : 'The nominal size printed on the label (the 10 in “WINGS 10KG”).'}
+            {printedNet ? ` · printed net on this carton: ${printedNet}` : ''}
           </span>
           <span className="mt-1 block text-xs text-slate-500">
-            Leave blank to count these cartons without adding kg.
+            Saved once, used for every carton — edit later in Label Intelligence. Leave blank to
+            count cartons with no kg.
           </span>
         </label>
       )}

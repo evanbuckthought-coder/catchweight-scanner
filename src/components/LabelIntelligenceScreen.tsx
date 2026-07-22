@@ -3,7 +3,7 @@ import type { GtinProfile } from '../types';
 import { loadOcrProfiles, removeOcrProfile, type OcrLabelProfile } from '../lib/ocrProfiles';
 import { TeachLabelFlow } from './TeachLabelFlow';
 import { OcrTrialScreen } from './OcrTrialScreen';
-import { loadChickenPacks, removeChickenPack, type ChickenPackProfile } from '../lib/chicken';
+import { loadChickenPacks, removeChickenPack, upsertChickenPack, type ChickenPackProfile } from '../lib/chicken';
 
 interface LabelIntelligenceScreenProps {
   /** Saved GTIN profiles (App owns this state so capture prefills stay fresh). */
@@ -38,6 +38,8 @@ export function LabelIntelligenceScreen({
     loadChickenPacks(),
   );
   const [confirmPackDelete, setConfirmPackDelete] = useState<string | null>(null);
+  /** In-place set-weight edit: which GTIN is being edited, and the draft. */
+  const [editPack, setEditPack] = useState<{ gtin: string; value: string } | null>(null);
 
   const gtinList = Object.values(profiles).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 
@@ -84,20 +86,21 @@ export function LabelIntelligenceScreen({
     );
   }
 
-  // ---- Chicken pack weights (learned set-weight cartons) -------------------
+  // ---- Chicken products (taught in Fresh Chicken) --------------------------
   if (sub === 'chickenpacks') {
     const packs = Object.values(chickenPacks).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     return (
       <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-4">
-        {header('Chicken pack weights', () => setSub('menu'))}
+        {header('Chicken products', () => setSub('menu'))}
         <p className="text-xs text-slate-500">
-          Carton weights learned in Fresh Chicken for set-weight lines (whose barcode carries no
-          weight). Delete one to be asked for it again on the next scan.
+          Products taught in Fresh Chicken. Set-weight lines are counted by carton — kg is worked
+          out as cartons × the set weight, so editing a set weight here updates the derived totals.
+          Delete one to be asked again on the next scan.
         </p>
         {packs.length === 0 ? (
           <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
-            No pack weights learned yet — Fresh Chicken asks for one the first time it sees a
-            set-weight product.
+            Nothing taught yet — Fresh Chicken asks the first time it sees a set-weight product, or
+            use 📷 Teach on its header.
           </div>
         ) : (
           <ul className="flex flex-col gap-2">
@@ -105,12 +108,25 @@ export function LabelIntelligenceScreen({
               <li key={p.gtin} className="rounded-xl bg-slate-800/70 px-3 py-3 ring-1 ring-slate-700">
                 <div className="flex items-center gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-semibold text-slate-100">
-                      {p.product || '(unnamed product)'}
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                          p.type === 'set'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-sky-500/20 text-sky-300'
+                        }`}
+                      >
+                        {p.type === 'set' ? 'SET' : 'RANDOM'}
+                      </span>
+                      <span className="truncate font-semibold text-slate-100">
+                        {p.product || '(unnamed product)'}
+                      </span>
                     </div>
                     <div className="truncate text-xs text-slate-400">
                       GTIN {p.gtin} ·{' '}
-                      {p.packKg == null ? (
+                      {p.type === 'random' ? (
+                        <span className="text-sky-300">weighed per carton</span>
+                      ) : p.packKg == null ? (
                         <span className="text-amber-300">count only, no weight</span>
                       ) : (
                         <span className="font-mono text-emerald-400">{p.packKg.toFixed(2)} kg/carton</span>
@@ -132,6 +148,7 @@ export function LabelIntelligenceScreen({
                         onClick={() => {
                           setChickenPacks({ ...removeChickenPack(p.gtin) });
                           setConfirmPackDelete(null);
+                          if (editPack?.gtin === p.gtin) setEditPack(null);
                         }}
                         className="rounded-lg bg-rose-500 px-2 py-2 text-xs font-bold text-slate-900"
                       >
@@ -139,16 +156,65 @@ export function LabelIntelligenceScreen({
                       </button>
                     </div>
                   ) : (
-                    <button
-                      type="button"
-                      data-testid={`pack-delete-${p.gtin}`}
-                      onClick={() => setConfirmPackDelete(p.gtin)}
-                      className="shrink-0 rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-rose-300"
-                    >
-                      Delete
-                    </button>
+                    <div className="flex shrink-0 gap-1">
+                      {p.type === 'set' && (
+                        <button
+                          type="button"
+                          data-testid={`pack-edit-${p.gtin}`}
+                          onClick={() =>
+                            setEditPack(
+                              editPack?.gtin === p.gtin
+                                ? null
+                                : { gtin: p.gtin, value: p.packKg != null ? String(p.packKg) : '' },
+                            )
+                          }
+                          className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-sky-300"
+                        >
+                          Edit
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        data-testid={`pack-delete-${p.gtin}`}
+                        onClick={() => setConfirmPackDelete(p.gtin)}
+                        className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-rose-300"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   )}
                 </div>
+                {editPack?.gtin === p.gtin && (
+                  <div className="mt-2 flex items-center gap-2 rounded-lg bg-slate-900/60 p-2 ring-1 ring-slate-600">
+                    <label className="flex-1 text-xs text-slate-400">
+                      Set weight (kg/carton)
+                      <input
+                        data-testid={`pack-edit-input-${p.gtin}`}
+                        value={editPack.value}
+                        onChange={(e) => setEditPack({ gtin: p.gtin, value: e.target.value })}
+                        inputMode="decimal"
+                        autoFocus
+                        className="mt-1 w-full rounded-lg bg-slate-800 px-2 py-2 text-lg font-bold tabular-nums text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      data-testid={`pack-edit-save-${p.gtin}`}
+                      disabled={!(Number(editPack.value) > 0)}
+                      onClick={() => {
+                        const kg = Number(editPack.value);
+                        if (!Number.isFinite(kg) || kg <= 0) return;
+                        setChickenPacks({
+                          ...upsertChickenPack({ ...p, packKg: kg, updatedAt: new Date().toISOString() }),
+                        });
+                        setEditPack(null);
+                      }}
+                      className="h-11 shrink-0 self-end rounded-lg bg-emerald-500 px-4 text-sm font-bold text-slate-900 disabled:opacity-40"
+                    >
+                      Save
+                    </button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -408,9 +474,9 @@ export function LabelIntelligenceScreen({
         onClick={() => setSub('chickenpacks')}
         className="rounded-xl bg-slate-800 px-4 py-4 text-left text-base font-semibold text-slate-200 ring-1 ring-slate-600 active:bg-slate-700"
       >
-        🐔 Chicken pack weights
+        🐔 Chicken products
         <span className="block text-xs font-normal text-slate-500">
-          {Object.keys(chickenPacks).length} learned · set-weight cartons · delete to relearn
+          {Object.keys(chickenPacks).length} taught · edit set weights · delete to relearn
         </span>
       </button>
 
