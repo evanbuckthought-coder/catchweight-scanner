@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CartonRecord, GtinProfile, Session } from './types';
 import { parseGS1, type ParsedCarton } from './lib/gs1';
+import { createScanGate } from './lib/scanGate';
 import { rememberSupplier } from './lib/suppliers';
 import { rememberProduct } from './lib/products';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
@@ -207,7 +208,7 @@ export default function App() {
   );
   const [chickenSavedCount, setChickenSavedCount] = useState(() => loadSavedChickenCounts().length);
 
-  const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
+  const scanGateRef = useRef(createScanGate(REPEAT_WINDOW_MS));
   /**
    * True while any capture-interrupting sheet is open. Set synchronously when a
    * sheet opens so two decodes in the SAME camera frame can't both act (React
@@ -271,14 +272,9 @@ export default function App() {
     (raw: string) => {
       if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
 
-      // Sliding repeat window: while the same label stays in view, keep
-      // refreshing the timestamp so it can never re-add itself every 3s.
-      const now = Date.now();
-      if (raw === lastDecodeRef.current.raw && now - lastDecodeRef.current.time < REPEAT_WINDOW_MS) {
-        lastDecodeRef.current.time = now;
-        return;
-      }
-      lastDecodeRef.current = { raw, time: now };
+      // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
+      // must be per raw (labels can carry several readable barcodes).
+      if (!scanGateRef.current.admit(raw)) return;
 
       const parsed = parseGS1(raw);
       if (!parsed.valid) {
@@ -551,12 +547,12 @@ export default function App() {
 
   const newPallet = useCallback(() => {
     setSessionState((prev) => (prev ? { ...prev, activePalletId: null } : prev));
-    lastDecodeRef.current = { raw: '', time: 0 };
+    scanGateRef.current.reset();
   }, []);
 
   const nextProduct = useCallback(() => {
     setSessionState((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
-    lastDecodeRef.current = { raw: '', time: 0 };
+    scanGateRef.current.reset();
     setMode('barcode'); // next product starts with its first-carton scan
   }, []);
 
@@ -649,7 +645,7 @@ export default function App() {
       setView('scan');
       setMode('barcode');
       setNav('home');
-      lastDecodeRef.current = { raw: '', time: 0 };
+      scanGateRef.current.reset();
       showToast(`Saved ${cur.poRef} to history`, 'info');
     } catch (err) {
       showToast(`Save failed — session kept. ${String(err)}`, 'error');
@@ -663,7 +659,7 @@ export default function App() {
     setView('scan');
     setMode('barcode');
     setNav('home');
-    lastDecodeRef.current = { raw: '', time: 0 };
+    scanGateRef.current.reset();
   }, []);
 
   /** Delete a GTIN profile (Label Intelligence "delete / relearn"). App owns
@@ -749,21 +745,21 @@ export default function App() {
       const product = prev.products.find((p) => p.id === productId);
       return { ...prev, activeProductId: productId, activePalletId: product?.pallets.at(-1)?.id ?? null };
     });
-    lastDecodeRef.current = { raw: '', time: 0 };
+    scanGateRef.current.reset();
     setMode('barcode');
     setView('scan');
   }, []);
 
   const amendPallet = useCallback((productId: string, palletId: string) => {
     setSessionState((prev) => (prev ? { ...prev, activeProductId: productId, activePalletId: palletId } : prev));
-    lastDecodeRef.current = { raw: '', time: 0 };
+    scanGateRef.current.reset();
     setMode('barcode');
     setView('scan');
   }, []);
 
   const captureNewProduct = useCallback(() => {
     setSessionState((prev) => (prev ? { ...prev, activeProductId: null, activePalletId: null } : prev));
-    lastDecodeRef.current = { raw: '', time: 0 };
+    scanGateRef.current.reset();
     setMode('barcode');
     setView('scan');
   }, []);

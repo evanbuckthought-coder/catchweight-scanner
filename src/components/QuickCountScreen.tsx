@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ScannerView } from './ScannerView';
 import { ManualKeypad } from './ManualKeypad';
 import { parseGS1 } from '../lib/gs1';
+import { createScanGate } from '../lib/scanGate';
 import { roundKg, toKg, type WeightUnit } from '../lib/units';
 import { signalError, signalSuccess } from '../lib/feedback';
 import { uid } from '../lib/storage';
@@ -61,7 +62,7 @@ export function QuickCountScreen({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
   const [emailNote, setEmailNote] = useState('');
-  const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
+  const scanGateRef = useRef(createScanGate(REPEAT_WINDOW_MS));
 
   const total = quickCountTotalKg(entries);
 
@@ -87,12 +88,9 @@ export function QuickCountScreen({
   };
 
   const handleDecode = (raw: string) => {
-    const now = Date.now();
-    if (raw === lastDecodeRef.current.raw && now - lastDecodeRef.current.time < REPEAT_WINDOW_MS) {
-      lastDecodeRef.current.time = now;
-      return;
-    }
-    lastDecodeRef.current = { raw, time: now };
+    // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
+    // must be per raw (labels can carry several readable barcodes).
+    if (!scanGateRef.current.admit(raw)) return;
 
     const parsed = parseGS1(raw);
     if (!parsed.valid) {

@@ -6,6 +6,7 @@ import { ChickenPalletSheet } from './ChickenPalletSheet';
 import { ChickenTeachFlow } from './ChickenTeachFlow';
 import { parseGS1, type ParsedCarton } from '../lib/gs1';
 import { getProfile } from '../lib/profiles';
+import { createScanGate } from '../lib/scanGate';
 import { roundKg } from '../lib/units';
 import { signalError, signalSuccess } from '../lib/feedback';
 import {
@@ -84,7 +85,7 @@ export function ChickenCountScreen({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
   const [emailNote, setEmailNote] = useState('');
-  const lastDecodeRef = useRef<{ raw: string; time: number }>({ raw: '', time: 0 });
+  const scanGateRef = useRef(createScanGate(REPEAT_WINDOW_MS));
   /** Set synchronously so two decodes in one frame can't both open the sheet. */
   const sheetGateRef = useRef(false);
 
@@ -107,12 +108,9 @@ export function ChickenCountScreen({
 
   const handleDecode = (raw: string) => {
     if (sheetGateRef.current) return;
-    const now = Date.now();
-    if (raw === lastDecodeRef.current.raw && now - lastDecodeRef.current.time < REPEAT_WINDOW_MS) {
-      lastDecodeRef.current.time = now;
-      return;
-    }
-    lastDecodeRef.current = { raw, time: now };
+    // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
+    // must be per raw (labels can carry several readable barcodes).
+    if (!scanGateRef.current.admit(raw)) return;
 
     const parsed = parseGS1(raw);
     const outcome = resolveChickenScan(parsed, entries);
