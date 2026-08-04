@@ -8,6 +8,7 @@ import { signalError, signalSuccess } from '../lib/feedback';
 import { uid } from '../lib/storage';
 import {
   exportQuickCount,
+  findQuickDuplicate,
   preloadXlsx,
   quickCountTotalKg,
   type QuickCountEntry,
@@ -75,7 +76,12 @@ export function QuickCountScreen({
     return () => clearTimeout(t);
   }, [feedback]);
 
-  const addWeight = (netWeight: number, u: WeightUnit, entry: QuickCountEntry['entry']) => {
+  const addWeight = (
+    netWeight: number,
+    u: WeightUnit,
+    entry: QuickCountEntry['entry'],
+    scanInfo?: { gtin?: string; serial?: string; raw: string },
+  ) => {
     onAdd({
       id: uid(),
       netWeight,
@@ -83,6 +89,7 @@ export function QuickCountScreen({
       weightKg: toKg(netWeight, u),
       entry,
       time: new Date().toISOString(),
+      ...scanInfo,
     });
     signalSuccess();
   };
@@ -103,7 +110,23 @@ export function QuickCountScreen({
       setFeedback('No weight in that barcode — switch to Manual to key it');
       return;
     }
-    addWeight(parsed.netWeight, parsed.weightUnit ?? 'kg', 'scan');
+    // Same-carton flag (mirrors the receival flow): a serial match or an
+    // identical full barcode means this carton is already in the list.
+    const dup = findQuickDuplicate(entries, { gtin: parsed.gtin, serial: parsed.serial, raw });
+    if (dup) {
+      signalError();
+      setFeedback(
+        parsed.serial
+          ? `⚠ Already scanned — serial ${parsed.serial}. ✕ it in the list if that’s wrong.`
+          : '⚠ Already scanned — identical barcode. ✕ it in the list if that’s wrong.',
+      );
+      return;
+    }
+    addWeight(parsed.netWeight, parsed.weightUnit ?? 'kg', 'scan', {
+      gtin: parsed.gtin,
+      serial: parsed.serial,
+      raw,
+    });
     setFeedback(`+ ${roundKg(parsed.weightKg).toFixed(2)} kg (scanned)`);
   };
 

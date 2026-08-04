@@ -24,6 +24,40 @@ export interface QuickCountEntry {
   /** How it was captured. */
   entry: 'scan' | 'manual';
   time: string;
+  /** Scan provenance (absent on manual entries and first-release counts) —
+   *  what the duplicate flag matches on. */
+  gtin?: string;
+  serial?: string;
+  raw?: string;
+}
+
+/** What a scanned barcode exposes for the duplicate check. */
+export interface QuickDuplicateProbe {
+  gtin?: string;
+  serial?: string;
+  raw: string;
+}
+
+/**
+ * Find an already-counted entry this scan duplicates — same rules as the
+ * receival flow's findDuplicate:
+ *  - serial (AI 21) is unique per carton -> hard match on GTIN + serial;
+ *  - otherwise an identical full raw string is a true re-scan of the same
+ *    physical carton (two genuinely different cartons differ in weight or
+ *    serial, which changes the raw).
+ * Manual entries (no raw) never match, and neither do entries from before
+ * this field existed.
+ */
+export function findQuickDuplicate(
+  entries: QuickCountEntry[],
+  probe: QuickDuplicateProbe,
+): QuickCountEntry | undefined {
+  if (probe.gtin && probe.serial) {
+    const bySerial = entries.find((e) => e.gtin === probe.gtin && e.serial === probe.serial);
+    if (bySerial) return bySerial;
+  }
+  if (!probe.raw) return undefined;
+  return entries.find((e) => e.raw === probe.raw);
 }
 
 /** A quick count saved to the device for later lookup / re-export. */
@@ -88,16 +122,16 @@ async function buildQuickCountWorkbook(
     ['Counted by', meta.scannedBy || '—'],
     ['Date/time', formatDateTime(meta.when)],
     [],
-    ['#', 'Time', 'Net weight', 'Unit', 'Weight (kg)', 'Entry'],
+    ['#', 'Time', 'Net weight', 'Unit', 'Weight (kg)', 'Entry', 'Serial'],
   ];
   entries.forEach((e, i) => {
-    aoa.push([i + 1, formatDateTime(e.time), e.netWeight, e.unit, roundKg(e.weightKg), ENTRY_LABEL[e.entry]]);
+    aoa.push([i + 1, formatDateTime(e.time), e.netWeight, e.unit, roundKg(e.weightKg), ENTRY_LABEL[e.entry], e.serial ?? '']);
   });
   aoa.push([]);
   aoa.push(['TOTAL', '', '', '', quickCountTotalKg(entries), `${entries.length} item${entries.length === 1 ? '' : 's'}`]);
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 6 }, { wch: 20 }, { wch: 12 }, { wch: 6 }, { wch: 12 }, { wch: 10 }];
+  ws['!cols'] = [{ wch: 6 }, { wch: 20 }, { wch: 12 }, { wch: 6 }, { wch: 12 }, { wch: 10 }, { wch: 12 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Quick Count');
   return wb;

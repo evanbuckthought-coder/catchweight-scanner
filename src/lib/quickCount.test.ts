@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  findQuickDuplicate,
   loadSavedQuickCounts,
   quickCountTotalKg,
   removeSavedQuickCount,
@@ -32,6 +33,40 @@ describe('quickCountTotalKg', () => {
   it('sums lb entries by their converted kg', () => {
     // 32.06 lb -> 14.54 kg (already stored in weightKg by the caller)
     expect(quickCountTotalKg([entry(14.54, { unit: 'lb', netWeight: 32.06 })])).toBeCloseTo(14.54, 2);
+  });
+});
+
+describe('findQuickDuplicate — same-carton flag (mirrors the receival rules)', () => {
+  const rawA = '(01)94015433211209(3102)002246(21)0012843';
+  const scanned = entry(22.46, { entry: 'scan', gtin: '94015433211209', serial: '0012843', raw: rawA });
+
+  it('flags a re-scan by GTIN + serial', () => {
+    expect(
+      findQuickDuplicate([scanned], { gtin: '94015433211209', serial: '0012843', raw: 'different-read' }),
+    ).toBe(scanned);
+  });
+
+  it('a different serial on the same product is NOT a duplicate', () => {
+    expect(
+      findQuickDuplicate([scanned], { gtin: '94015433211209', serial: '0099999', raw: '(01)94015433211209(3102)002313(21)0099999' }),
+    ).toBeUndefined();
+  });
+
+  it('flags an identical full barcode when there is no serial', () => {
+    const noSerialRaw = '(01)94015433211209(3102)002246(10)P0447';
+    const e = entry(22.46, { entry: 'scan', gtin: '94015433211209', raw: noSerialRaw });
+    expect(findQuickDuplicate([e], { gtin: '94015433211209', raw: noSerialRaw })).toBe(e);
+  });
+
+  it('same product, different weight is NOT a duplicate (raw differs)', () => {
+    const e = entry(22.46, { entry: 'scan', gtin: '94015433211209', raw: '(01)94015433211209(3102)002246(10)P0447' });
+    expect(
+      findQuickDuplicate([e], { gtin: '94015433211209', raw: '(01)94015433211209(3102)002375(10)P0447' }),
+    ).toBeUndefined();
+  });
+
+  it('manual entries and first-release entries (no raw) never match', () => {
+    expect(findQuickDuplicate([entry(22.46)], { gtin: '94015433211209', raw: rawA })).toBeUndefined();
   });
 });
 
