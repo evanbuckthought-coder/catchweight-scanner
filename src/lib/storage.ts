@@ -29,6 +29,8 @@ export const STORAGE_KEYS = {
   quickCounts: 'cw.quickCounts',
   /** Learned carton (pack) weight per GTIN for set-weight chicken lines. */
   chickenPacks: 'cw.chickenPacks',
+  /** AI-taught FORMAT MAPS for non-GS1 barcodes (structure only, no values). */
+  barcodeMaps: 'cw.barcodeMaps',
   /** The in-progress Fresh Chicken count (survives reload). */
   chickenActive: 'cw.chickenCountActive',
   /** Saved Fresh Chicken counts — its own list, apart from History. */

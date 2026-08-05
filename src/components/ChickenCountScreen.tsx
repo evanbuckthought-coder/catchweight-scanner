@@ -5,6 +5,10 @@ import { ChickenPackSheet } from './ChickenPackSheet';
 import { ChickenPalletSheet } from './ChickenPalletSheet';
 import { ChickenTeachFlow } from './ChickenTeachFlow';
 import { parseGS1, type ParsedCarton } from '../lib/gs1';
+import { cartonFromDecoded, parseScan } from '../lib/scan';
+import { isMapConfirmedThisSession, type DecodedBarcode, type SavedBarcodeMap } from '../lib/barcodeMaps';
+import { BarcodeTeachFlow } from './BarcodeTeachFlow';
+import { BarcodeConfirmSheet } from './BarcodeConfirmSheet';
 import { getProfile } from '../lib/profiles';
 import { createScanGate } from '../lib/scanGate';
 import { roundKg } from '../lib/units';
@@ -82,6 +86,10 @@ export function ChickenCountScreen({
   const [lastCounted, setLastCounted] = useState<ChickenEntry | null>(null);
   /** Pallet sheet open for this scanned carton. */
   const [pallet, setPallet] = useState<ChickenEntry | null>(null);
+  /** An unreadable barcode awaiting "Analyse with AI" / manual. */
+  const [teachRaw, setTeachRaw] = useState<{ raw: string; reason: string } | null>(null);
+  /** A saved-format decode awaiting this run's one-off human confirmation. */
+  const [confirmMap, setConfirmMap] = useState<{ decoded: DecodedBarcode; map: SavedBarcodeMap; raw: string } | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
   const [emailNote, setEmailNote] = useState('');
@@ -107,19 +115,43 @@ export function ChickenCountScreen({
   }, [feedback]);
 
   const handleDecode = (raw: string) => {
-    if (sheetGateRef.current) return;
+    if (sheetGateRef.current || teachRaw || confirmMap) return;
     // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
     // must be per raw (labels can carry several readable barcodes).
     if (!scanGateRef.current.admit(raw)) return;
 
-    const parsed = parseGS1(raw);
+    // GS1 first; an AI-taught custom format only as a fallback (lib/scan.ts).
+    const res = parseScan(raw);
+    if (res.kind === 'refused') {
+      signalError();
+      setFeedback({ text: `⚠ ${res.reason}`, ok: false });
+      return;
+    }
+    if (res.kind === 'ambiguous') {
+      signalError();
+      setFeedback({ text: '⚠ Two saved barcode formats match — delete one in Label Intelligence', ok: false });
+      return;
+    }
+    // A custom format taught in an earlier session gets one human check per run.
+    if (res.kind === 'carton' && res.map && res.decoded && !isMapConfirmedThisSession(res.map.id)) {
+      sheetGateRef.current = true;
+      setConfirmMap({ decoded: res.decoded, map: res.map, raw });
+      return;
+    }
+
+    const parsed = res.kind === 'carton' ? res.parsed : parseGS1(raw);
     const outcome = resolveChickenScan(parsed, entries);
 
     switch (outcome.kind) {
       case 'not-gs1':
         signalError();
-        // These labels also carry a Lot ID and an internal code — only the
-        // GS1 one (starting 01 / "(01)") has the GTIN.
+        // Not GS1 and no saved format decoded it — offer AI analysis, since
+        // these labels also carry Lot ID / internal codes that never count.
+        if (res.kind === 'unreadable') {
+          sheetGateRef.current = true;
+          setTeachRaw({ raw, reason: res.reason });
+          return;
+        }
         setFeedback({ text: 'Not the GS1 barcode — scan the one starting (01)', ok: false });
         return;
       case 'duplicate':
@@ -411,7 +443,7 @@ export function ChickenCountScreen({
 
       <ScannerView
         active
-        paused={!!pending || !!naming || !!teaching || !!pallet}
+        paused={!!pending || !!naming || !!teaching || !!pallet || !!teachRaw || !!confirmMap}
         mode="barcode"
         onDecode={handleDecode}
         onOcrRead={() => {}}
@@ -551,6 +583,64 @@ export function ChickenCountScreen({
           Finish ▸
         </button>
       </div>
+
+      {teachRaw && (
+        <BarcodeTeachFlow
+          raw={teachRaw.raw}
+          reason={teachRaw.reason}
+          onSaved={(decoded, map) => {
+            // Re-run the normal chicken rules with the decoded carton, so a
+            // custom-format product still gets named/typed like any other.
+            const parsed = cartonFromDecoded(teachRaw.raw, decoded, map);
+            setTeachRaw(null);
+            sheetGateRef.current = false;
+            const outcome = resolveChickenScan(parsed, entries);
+            if (outcome.kind === 'counted') countEntry(outcome.entry);
+            else if (outcome.kind === 'needs-name') {
+              sheetGateRef.current = true;
+              setNaming({ parsed: outcome.parsed, gtin: outcome.gtin });
+            } else if (outcome.kind === 'needs-pack') {
+              sheetGateRef.current = true;
+              setPending({ parsed: outcome.parsed, gtin: outcome.gtin });
+            }
+          }}
+          onManual={() => {
+            setTeachRaw(null);
+            sheetGateRef.current = false;
+            setFeedback({ text: 'Not counted — this barcode can’t be read automatically.', ok: false });
+          }}
+          onCancel={() => {
+            setTeachRaw(null);
+            sheetGateRef.current = false;
+          }}
+        />
+      )}
+
+      {confirmMap && (
+        <BarcodeConfirmSheet
+          decoded={confirmMap.decoded}
+          map={confirmMap.map}
+          onAccept={() => {
+            const parsed = cartonFromDecoded(confirmMap.raw, confirmMap.decoded, confirmMap.map);
+            setConfirmMap(null);
+            sheetGateRef.current = false;
+            const outcome = resolveChickenScan(parsed, entries);
+            if (outcome.kind === 'counted') countEntry(outcome.entry);
+            else if (outcome.kind === 'needs-name') {
+              sheetGateRef.current = true;
+              setNaming({ parsed: outcome.parsed, gtin: outcome.gtin });
+            } else if (outcome.kind === 'needs-pack') {
+              sheetGateRef.current = true;
+              setPending({ parsed: outcome.parsed, gtin: outcome.gtin });
+            }
+          }}
+          onReject={() => {
+            setConfirmMap(null);
+            sheetGateRef.current = false;
+            setFeedback({ text: 'Not counted.', ok: false });
+          }}
+        />
+      )}
 
       {pallet && (
         <ChickenPalletSheet

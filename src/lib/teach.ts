@@ -134,3 +134,44 @@ export async function analyseLabel(
   }
   return body.result;
 }
+
+/**
+ * Ask the AI to work out a non-GS1 barcode's FORMAT MAP from the label photo.
+ *
+ * `digits` MUST be the exact string the scanner read — it is sent so the model
+ * can locate the printed values inside it. What comes back is structure only
+ * (positions/encodings); the caller re-decodes the scanner's own digits
+ * on-device and validates before anything is saved or counted.
+ */
+export async function analyseBarcode(
+  image: CompressedLabelImage,
+  digits: string,
+): Promise<unknown> {
+  let res: Response;
+  try {
+    res = await fetch('/api/teach-label', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [TEACH_SECRET_HEADER]: TEACH_SECRET,
+      },
+      body: JSON.stringify({
+        mode: 'barcode',
+        image: image.base64,
+        mediaType: image.mediaType,
+        digits,
+      }),
+    });
+  } catch {
+    throw new TeachError('No connection — analysing a barcode needs internet. Check connectivity and retry.');
+  }
+
+  const body = (await res.json().catch(() => null)) as
+    | { ok?: boolean; result?: unknown; error?: string }
+    | null;
+
+  if (!res.ok || !body?.ok || !body.result) {
+    throw new TeachError(body?.error ?? `Analysis failed (HTTP ${res.status}) — try again.`);
+  }
+  return body.result;
+}

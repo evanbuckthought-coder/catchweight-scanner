@@ -25,6 +25,13 @@ import {
   // NB: the .js extension is required — the project is ESM ("type": "module"),
   // and the Vercel Node runtime resolves relative imports per ESM rules.
 } from '../src/lib/teachShared.js';
+import {
+  BARCODE_OUTPUT_SCHEMA,
+  barcodePrompt,
+  extractBarcodeMapJson,
+  validateBarcodeTeachRequest,
+  type BarcodeTeachRequestBody,
+} from '../src/lib/barcodeTeachShared.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-opus-4-8';
@@ -52,16 +59,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const invalid = validateTeachRequest(req.body);
+  // Two analysis modes share this endpoint (and its key + abuse guard):
+  //  - 'label'   (default): learn a label's LAYOUT for OCR/description
+  //  - 'barcode':           learn a non-GS1 barcode's FORMAT MAP
+  // Both teach structure only; neither returns a value that gets counted.
+  const barcodeMode = (req.body as { mode?: string } | null)?.mode === 'barcode';
+
+  const invalid = barcodeMode ? validateBarcodeTeachRequest(req.body) : validateTeachRequest(req.body);
   if (invalid) {
     res.status(400).json({ error: invalid });
     return;
   }
-  const { image, mediaType, hint } = req.body as TeachRequestBody;
 
-  const userText = hint?.trim()
-    ? `${TEACH_PROMPT}\n\nHint from the operator about this label: ${hint.trim()}`
-    : TEACH_PROMPT;
+  const { image, mediaType } = req.body as TeachRequestBody | BarcodeTeachRequestBody;
+  const hint = barcodeMode ? undefined : (req.body as TeachRequestBody).hint;
+
+  const schema = barcodeMode ? BARCODE_OUTPUT_SCHEMA : TEACH_OUTPUT_SCHEMA;
+  const userText = barcodeMode
+    ? barcodePrompt((req.body as BarcodeTeachRequestBody).digits)
+    : hint?.trim()
+      ? `${TEACH_PROMPT}\n\nHint from the operator about this label: ${hint.trim()}`
+      : TEACH_PROMPT;
 
   try {
     const aiRes = await fetch(ANTHROPIC_URL, {
@@ -75,7 +93,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         model: MODEL,
         max_tokens: 8000,
         thinking: { type: 'adaptive' },
-        output_config: { format: { type: 'json_schema', schema: TEACH_OUTPUT_SCHEMA } },
+        output_config: { format: { type: 'json_schema', schema } },
         messages: [
           {
             role: 'user',
@@ -132,7 +150,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
-    res.status(200).json({ ok: true, result: extractTeachJson(text) });
+    res.status(200).json({
+      ok: true,
+      result: barcodeMode ? extractBarcodeMapJson(text) : extractTeachJson(text),
+    });
   } catch (err) {
     console.error('teach-label failed', err);
     // detail: safe diagnostic (error class + message). Redact any long

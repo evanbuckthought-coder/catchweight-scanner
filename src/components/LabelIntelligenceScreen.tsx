@@ -4,6 +4,7 @@ import { loadOcrProfiles, removeOcrProfile, type OcrLabelProfile } from '../lib/
 import { TeachLabelFlow } from './TeachLabelFlow';
 import { OcrTrialScreen } from './OcrTrialScreen';
 import { loadChickenPacks, removeChickenPack, upsertChickenPack, type ChickenPackProfile } from '../lib/chicken';
+import { loadBarcodeMaps, removeBarcodeMap, type SavedBarcodeMap } from '../lib/barcodeMaps';
 
 interface LabelIntelligenceScreenProps {
   /** Saved GTIN profiles (App owns this state so capture prefills stay fresh). */
@@ -14,7 +15,7 @@ interface LabelIntelligenceScreenProps {
   onBack: () => void;
 }
 
-type SubView = 'menu' | 'teach' | 'gtin' | 'ocr' | 'ocrtrial' | 'chickenpacks';
+type SubView = 'menu' | 'teach' | 'gtin' | 'ocr' | 'ocrtrial' | 'chickenpacks' | 'barcodemaps';
 
 /**
  * Label Intelligence: the home for everything that teaches the app about
@@ -38,6 +39,8 @@ export function LabelIntelligenceScreen({
     loadChickenPacks(),
   );
   const [confirmPackDelete, setConfirmPackDelete] = useState<string | null>(null);
+  const [barcodeMaps, setBarcodeMaps] = useState<SavedBarcodeMap[]>(() => loadBarcodeMaps());
+  const [confirmMapDelete, setConfirmMapDelete] = useState<string | null>(null);
   /** In-place set-weight edit: which GTIN is being edited, and the draft. */
   const [editPack, setEditPack] = useState<{ gtin: string; value: string } | null>(null);
 
@@ -82,6 +85,87 @@ export function LabelIntelligenceScreen({
       <div className="mx-auto flex min-h-screen max-w-md flex-col gap-4 p-4">
         {header('OCR (experimental)', () => setSub('menu'))}
         <OcrTrialScreen onTeach={() => setSub('teach')} />
+      </div>
+    );
+  }
+
+  // ---- Custom barcode formats (AI-taught structure maps) -------------------
+  if (sub === 'barcodemaps') {
+    return (
+      <div className="mx-auto flex min-h-screen max-w-md flex-col gap-3 p-4">
+        {header('Custom barcode formats', () => setSub('menu'))}
+        <p className="text-xs text-slate-500">
+          Non-GS1 barcodes the AI has been asked to map. Only the STRUCTURE is stored (which digit
+          positions hold the weight, date, product code) — never a weight value. Every scan is
+          decoded on-device from the scanner’s own digits and re-checked before it counts. Delete
+          one to be asked to relearn it.
+        </p>
+        {barcodeMaps.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-slate-700 px-3 py-6 text-center text-sm text-slate-500">
+            None yet — when a barcode can’t be read, the scan screen offers “Analyse barcode with AI”.
+          </div>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {barcodeMaps.map((m) => {
+              const w = m.fields.netWeight;
+              return (
+                <li key={m.id} className="rounded-xl bg-slate-800/70 px-3 py-3 ring-1 ring-slate-700">
+                  <div className="flex items-start gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-semibold text-slate-100">{m.formatName}</div>
+                      <div className="mt-0.5 text-xs text-slate-400">
+                        {m.signature.length} digits
+                        {m.signature.prefix ? ` · starts "${m.signature.prefix}"` : ''}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        {w
+                          ? `Weight: positions ${w.start}–${w.start + w.length - 1} × ${w.multiplier} ${w.unit}`
+                          : 'No weight field'}
+                        {m.fields.productionDate
+                          ? ` · date: ${m.fields.productionDate.encoding}`
+                          : ''}
+                      </div>
+                      <div className="mt-1 break-all font-mono text-[11px] text-slate-600">
+                        taught from {m.sampleRaw}
+                      </div>
+                    </div>
+                    {confirmMapDelete === m.id ? (
+                      <div className="flex shrink-0 gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmMapDelete(null)}
+                          className="rounded-lg bg-slate-700 px-2 py-2 text-xs font-medium text-slate-200"
+                        >
+                          Keep
+                        </button>
+                        <button
+                          type="button"
+                          data-testid={`map-delete-confirm-${m.id}`}
+                          onClick={() => {
+                            setBarcodeMaps(removeBarcodeMap(m.id));
+                            setConfirmMapDelete(null);
+                          }}
+                          className="rounded-lg bg-rose-500 px-2 py-2 text-xs font-bold text-slate-900"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid={`map-delete-${m.id}`}
+                        onClick={() => setConfirmMapDelete(m.id)}
+                        className="shrink-0 rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-rose-300"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
     );
   }
@@ -477,6 +561,18 @@ export function LabelIntelligenceScreen({
         🐔 Chicken products
         <span className="block text-xs font-normal text-slate-500">
           {Object.keys(chickenPacks).length} taught · edit set weights · delete to relearn
+        </span>
+      </button>
+
+      <button
+        type="button"
+        data-testid="labels-barcodemaps"
+        onClick={() => setSub('barcodemaps')}
+        className="rounded-xl bg-slate-800 px-4 py-4 text-left text-base font-semibold text-slate-200 ring-1 ring-slate-600 active:bg-slate-700"
+      >
+        🔢 Custom barcode formats
+        <span className="block text-xs font-normal text-slate-500">
+          {barcodeMaps.length} taught · non-GS1 barcodes · structure only, decoded on-device
         </span>
       </button>
 

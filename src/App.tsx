@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CartonRecord, GtinProfile, Session } from './types';
-import { parseGS1, type ParsedCarton } from './lib/gs1';
+import { cartonKey, type ParsedCarton } from './lib/gs1';
+import { cartonFromDecoded, parseScan } from './lib/scan';
+import { isMapConfirmedThisSession, type DecodedBarcode, type SavedBarcodeMap } from './lib/barcodeMaps';
+import { BarcodeTeachFlow } from './components/BarcodeTeachFlow';
+import { BarcodeConfirmSheet } from './components/BarcodeConfirmSheet';
 import { createScanGate } from './lib/scanGate';
 import { rememberSupplier } from './lib/suppliers';
 import { rememberProduct } from './lib/products';
@@ -188,6 +192,10 @@ export default function App() {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const [labelIssue, setLabelIssue] = useState<LabelIssue | null>(null);
   const [weightPending, setWeightPending] = useState<WeightPending | null>(null);
+  /** An unreadable barcode awaiting "Analyse with AI" / manual entry. */
+  const [teachRaw, setTeachRaw] = useState<{ raw: string; reason: string } | null>(null);
+  /** A saved-format decode awaiting this run's one-off human confirmation. */
+  const [confirmMap, setConfirmMap] = useState<{ decoded: DecodedBarcode; map: SavedBarcodeMap; raw: string } | null>(null);
   const [editingName, setEditingName] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
@@ -216,8 +224,8 @@ export default function App() {
    */
   const sheetGateRef = useRef(false);
   useEffect(() => {
-    sheetGateRef.current = !!(pending || labelIssue || weightPending);
-  }, [pending, labelIssue, weightPending]);
+    sheetGateRef.current = !!(pending || labelIssue || weightPending || teachRaw || confirmMap);
+  }, [pending, labelIssue, weightPending, teachRaw, confirmMap]);
 
   useEffect(() => {
     if (!toast) return;
@@ -267,22 +275,16 @@ export default function App() {
     [],
   );
 
-  /** Single entry point for camera decodes and simulated barcode scans. */
-  const handleDecode = useCallback(
-    (raw: string) => {
-      if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
-
-      // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
-      // must be per raw (labels can carry several readable barcodes).
-      if (!scanGateRef.current.admit(raw)) return;
-
-      const parsed = parseGS1(raw);
-      if (!parsed.valid) {
-        signalError();
-        showToast(parsed.errors[0] ?? 'Could not parse label', 'error');
-        return;
-      }
-      const gtin = parsed.gtin!;
+  /**
+   * Everything that happens once a scan HAS produced a usable carton —
+   * whether it came from GS1 or from an on-device custom-format decode.
+   */
+  const handleDecodedCarton = useCallback(
+    (parsed: ParsedCarton) => {
+      if (!session || boot !== 'ready' || view === 'summary') return;
+      const raw = parsed.raw;
+      // Identity: GTIN on a GS1 label, item code on a custom-format one.
+      const gtin = cartonKey(parsed)!;
 
       // Dedupe: hard on serials; identical-raw only for batch-only labels
       // (batches are shared across cartons and must not block the 2nd..Nth).
@@ -369,6 +371,44 @@ export default function App() {
       commitScanned(parsed);
     },
     [session, boot, view, profiles, scanWeightWarnings, commitScanned, showToast],
+  );
+
+  /** Single entry point for camera decodes and simulated barcode scans. */
+  const handleDecode = useCallback(
+    (raw: string) => {
+      if (!session || boot !== 'ready' || sheetGateRef.current || view === 'summary') return;
+
+      // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
+      // must be per raw (labels can carry several readable barcodes).
+      if (!scanGateRef.current.admit(raw)) return;
+
+      // GS1 first; an AI-taught custom format only as a fallback (lib/scan.ts).
+      const res = parseScan(raw);
+      if (res.kind === 'refused') {
+        signalError();
+        showToast(res.reason, 'error');
+        return;
+      }
+      if (res.kind === 'ambiguous') {
+        signalError();
+        showToast('Two saved barcode formats match this — delete one in Label Intelligence', 'error');
+        return;
+      }
+      if (res.kind === 'unreadable') {
+        signalError();
+        sheetGateRef.current = true;
+        setTeachRaw({ raw, reason: res.reason });
+        return;
+      }
+      // A custom format taught in an earlier session gets one human check per run.
+      if (res.map && res.decoded && !isMapConfirmedThisSession(res.map.id)) {
+        sheetGateRef.current = true;
+        setConfirmMap({ decoded: res.decoded, map: res.map, raw });
+        return;
+      }
+      handleDecodedCarton(res.parsed);
+    },
+    [session, boot, view, handleDecodedCarton, showToast],
   );
 
   /** Confirm the first carton of a product: create it (pallet 1), or continue
@@ -1136,6 +1176,39 @@ export default function App() {
           brand={session.brand}
           onConfirm={confirmPending}
           onCancel={() => setPending(null)}
+        />
+      )}
+
+      {teachRaw && (
+        <BarcodeTeachFlow
+          raw={teachRaw.raw}
+          reason={teachRaw.reason}
+          onSaved={(decoded, map) => {
+            setTeachRaw(null);
+            // Feed the on-device decode back through the normal scan path, so
+            // a custom-format carton gets the same confirm / dedupe / warnings.
+            handleDecodedCarton(cartonFromDecoded(teachRaw.raw, decoded, map));
+          }}
+          onManual={() => {
+            setTeachRaw(null);
+            showToast('Switch to Manual entry to key this carton’s weight', 'info');
+          }}
+          onCancel={() => setTeachRaw(null)}
+        />
+      )}
+
+      {confirmMap && (
+        <BarcodeConfirmSheet
+          decoded={confirmMap.decoded}
+          map={confirmMap.map}
+          onAccept={() => {
+            setConfirmMap(null);
+            handleDecodedCarton(cartonFromDecoded(confirmMap.raw, confirmMap.decoded, confirmMap.map));
+          }}
+          onReject={() => {
+            setConfirmMap(null);
+            showToast('Not counted — key the weight in Manual entry', 'warn');
+          }}
         />
       )}
 

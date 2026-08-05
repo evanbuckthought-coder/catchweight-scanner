@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { ScannerView } from './ScannerView';
 import { ManualKeypad } from './ManualKeypad';
-import { parseGS1 } from '../lib/gs1';
+import { cartonKey } from '../lib/gs1';
+import { parseScan } from '../lib/scan';
+import { isMapConfirmedThisSession, type DecodedBarcode, type SavedBarcodeMap } from '../lib/barcodeMaps';
+import { BarcodeTeachFlow } from './BarcodeTeachFlow';
+import { BarcodeConfirmSheet } from './BarcodeConfirmSheet';
 import { createScanGate } from '../lib/scanGate';
 import { roundKg, toKg, type WeightUnit } from '../lib/units';
 import { signalError, signalSuccess } from '../lib/feedback';
@@ -63,6 +67,14 @@ export function QuickCountScreen({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [confirmNew, setConfirmNew] = useState(false);
   const [emailNote, setEmailNote] = useState('');
+  /** An unreadable barcode awaiting "Analyse with AI" / manual entry. */
+  const [teachRaw, setTeachRaw] = useState<{ raw: string; reason: string } | null>(null);
+  /** A saved-format decode awaiting this run's one-off human confirmation. */
+  const [confirmMap, setConfirmMap] = useState<{
+    decoded: DecodedBarcode;
+    map: SavedBarcodeMap;
+    raw: string;
+  } | null>(null);
   const scanGateRef = useRef(createScanGate(REPEAT_WINDOW_MS));
 
   const total = quickCountTotalKg(entries);
@@ -94,40 +106,78 @@ export function QuickCountScreen({
     signalSuccess();
   };
 
+  /** Add a scanned carton after all guards have passed. */
+  const countScan = (
+    raw: string,
+    netWeight: number,
+    unit: WeightUnit,
+    weightKg: number,
+    key: string | undefined,
+    serial: string | undefined,
+    note = '',
+  ) => {
+    // Same-carton flag (mirrors the receival flow): a serial match or an
+    // identical full barcode means this carton is already in the list.
+    const dup = findQuickDuplicate(entries, { gtin: key, serial, raw });
+    if (dup) {
+      signalError();
+      setFeedback(
+        serial
+          ? `⚠ Already scanned — serial ${serial}. ✕ it in the list if that’s wrong.`
+          : '⚠ Already scanned — identical barcode. ✕ it in the list if that’s wrong.',
+      );
+      return;
+    }
+    addWeight(netWeight, unit, 'scan', { gtin: key, serial, raw });
+    setFeedback(`+ ${roundKg(weightKg).toFixed(2)} kg (scanned${note})`);
+  };
+
   const handleDecode = (raw: string) => {
+    if (teachRaw || confirmMap) return;
     // Per-barcode sliding repeat window — see lib/scanGate.ts for why it
     // must be per raw (labels can carry several readable barcodes).
     if (!scanGateRef.current.admit(raw)) return;
 
-    const parsed = parseGS1(raw);
-    if (!parsed.valid) {
+    // GS1 first; an AI-taught custom format only as a fallback (lib/scan.ts).
+    const res = parseScan(raw);
+
+    if (res.kind === 'refused') {
       signalError();
-      setFeedback(parsed.errors[0] ?? 'Couldn’t read that barcode');
+      setFeedback(`⚠ ${res.reason}`);
       return;
     }
+    if (res.kind === 'ambiguous') {
+      signalError();
+      setFeedback('⚠ Two saved barcode formats match this — delete one in Label Intelligence, or key it manually.');
+      return;
+    }
+    if (res.kind === 'unreadable') {
+      signalError();
+      setTeachRaw({ raw, reason: res.reason });
+      return;
+    }
+
+    const { parsed } = res;
     if (parsed.weightKg == null || parsed.netWeight == null) {
       signalError();
       setFeedback('No weight in that barcode — switch to Manual to key it');
       return;
     }
-    // Same-carton flag (mirrors the receival flow): a serial match or an
-    // identical full barcode means this carton is already in the list.
-    const dup = findQuickDuplicate(entries, { gtin: parsed.gtin, serial: parsed.serial, raw });
-    if (dup) {
-      signalError();
-      setFeedback(
-        parsed.serial
-          ? `⚠ Already scanned — serial ${parsed.serial}. ✕ it in the list if that’s wrong.`
-          : '⚠ Already scanned — identical barcode. ✕ it in the list if that’s wrong.',
-      );
+    // A custom format taught in an earlier session gets one human check per
+    // run before it's trusted for the rest of the shift.
+    if (res.map && res.decoded && !isMapConfirmedThisSession(res.map.id)) {
+      setConfirmMap({ decoded: res.decoded, map: res.map, raw });
       return;
     }
-    addWeight(parsed.netWeight, parsed.weightUnit ?? 'kg', 'scan', {
-      gtin: parsed.gtin,
-      serial: parsed.serial,
+    countScan(
       raw,
-    });
-    setFeedback(`+ ${roundKg(parsed.weightKg).toFixed(2)} kg (scanned)`);
+      parsed.netWeight,
+      parsed.weightUnit ?? 'kg',
+      parsed.weightKg,
+      cartonKey(parsed),
+      parsed.serial,
+      parsed.format === 'custom' ? ' · custom format' : '',
+    );
   };
 
   const email = async () => {
@@ -274,7 +324,13 @@ export function QuickCountScreen({
       {runningTotal}
 
       {mode === 'barcode' ? (
-        <ScannerView active paused={false} mode="barcode" onDecode={handleDecode} onOcrRead={() => {}} />
+        <ScannerView
+          active
+          paused={!!teachRaw || !!confirmMap}
+          mode="barcode"
+          onDecode={handleDecode}
+          onOcrRead={() => {}}
+        />
       ) : (
         <ManualKeypad
           unit={unit}
@@ -401,6 +457,56 @@ export function QuickCountScreen({
           Finish ▸
         </button>
       </div>
+
+      {teachRaw && (
+        <BarcodeTeachFlow
+          raw={teachRaw.raw}
+          reason={teachRaw.reason}
+          onSaved={(decoded, map) => {
+            countScan(
+              teachRaw.raw,
+              decoded.unit === 'kg' ? decoded.weightKg : decoded.netWeight,
+              decoded.unit,
+              decoded.weightKg,
+              decoded.productCode,
+              decoded.serial,
+              ` · ${map.formatName}`,
+            );
+            setTeachRaw(null);
+          }}
+          onManual={() => {
+            setTeachRaw(null);
+            setMode('manual');
+            setFeedback('Key the weight below.');
+          }}
+          onCancel={() => setTeachRaw(null)}
+        />
+      )}
+
+      {confirmMap && (
+        <BarcodeConfirmSheet
+          decoded={confirmMap.decoded}
+          map={confirmMap.map}
+          onAccept={() => {
+            const { decoded, raw } = confirmMap;
+            countScan(
+              raw,
+              decoded.unit === 'kg' ? decoded.weightKg : decoded.netWeight,
+              decoded.unit,
+              decoded.weightKg,
+              decoded.productCode,
+              decoded.serial,
+              ' · custom format',
+            );
+            setConfirmMap(null);
+          }}
+          onReject={() => {
+            setConfirmMap(null);
+            setMode('manual');
+            setFeedback('Not counted — key the weight below.');
+          }}
+        />
+      )}
     </div>
   );
 }

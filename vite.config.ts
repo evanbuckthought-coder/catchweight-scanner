@@ -34,9 +34,67 @@ function mockTeachApi(): Plugin {
         };
         if (req.method !== 'POST') return send(405, { error: 'POST only' });
         if (!req.headers['x-teach-secret']) return send(401, { error: 'Unauthorised' });
-        // Drain the body, then reply after a realistic delay with a canned result.
-        req.resume();
+        // Collect the body so the barcode mock can answer for the actual
+        // scanned digits (the real model derives positions the same way).
+        let raw = '';
+        req.on('data', (chunk) => {
+          raw += chunk;
+        });
         req.on('end', () => {
+          const body = (() => {
+            try {
+              return JSON.parse(raw || '{}') as { mode?: string; digits?: string };
+            } catch {
+              return {} as { mode?: string; digits?: string };
+            }
+          })();
+
+          // --- barcode FORMAT MAP mock (mode: 'barcode') --------------------
+          if (body.mode === 'barcode') {
+            const digits = body.digits ?? '';
+            setTimeout(() => {
+              send(200, {
+                ok: true,
+                result: {
+                  formatName: 'NZ legacy 20-digit meat carton (MOCK)',
+                  totalLength: digits.length,
+                  fields: {
+                    netWeight: {
+                      start: 6,
+                      length: 3,
+                      encoding: 'integer',
+                      multiplier: 0.1,
+                      unit: 'kg',
+                      printedValueSeen: '15.3 kg',
+                      confidence: 0.95,
+                    },
+                    productionDate: {
+                      start: 9,
+                      length: 5,
+                      encoding: 'yy-dayofyear',
+                      printedValueSeen: '08 Mar 24',
+                      confidence: 0.9,
+                    },
+                    productCode: { start: 1, length: 5, printedValueSeen: '07-800', confidence: 0.9 },
+                    serial: { start: 14, length: 4, printedValueSeen: '1371', confidence: 0.8 },
+                    bestBefore: null,
+                  },
+                  signature: {
+                    length: digits.length,
+                    prefix: digits.slice(0, 1) || null,
+                    prefixLength: 1,
+                  },
+                  verification: {
+                    weightMatchesPrinted: true,
+                    dateMatchesPrinted: true,
+                    notes: 'Mock response from the vite dev server — production calls Claude.',
+                  },
+                },
+              });
+            }, 1200);
+            return;
+          }
+
           setTimeout(() => {
             send(200, {
               ok: true,

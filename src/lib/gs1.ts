@@ -58,6 +58,17 @@ export interface ParsedCarton {
   /** Leading 7 GTIN digits — used for the format fingerprint + supplier match. */
   companyPrefix?: string;
 
+  /**
+   * Which format produced this record. 'custom' means a non-GS1 barcode
+   * decoded on-device by an AI-taught format map (see lib/barcodeMaps.ts) —
+   * such labels have no GTIN, so their identity is `itemCode`.
+   */
+  format?: 'gs1' | 'custom';
+  /** Product/item code from a custom-format barcode (no GTIN on the label). */
+  itemCode?: string;
+  /** Name of the custom format that decoded this, for display. */
+  formatName?: string;
+
   /** NET weight in its labelled unit (kg for 310n, lb for 320n). */
   netWeight?: number;
   weightUnit?: WeightUnit;
@@ -348,6 +359,15 @@ function buildCarton(raw: string, elements: GS1Element[], errors: string[]): Par
   carton.valid = !!carton.gtin && carton.weightKg !== undefined;
 
   return carton;
+}
+
+/**
+ * The identity a carton is keyed by: the GTIN on a GS1 label, or the item
+ * code on a custom-format one. Use this wherever a scan needs a product key
+ * (dedupe, profiles, per-product grouping).
+ */
+export function cartonKey(c: ParsedCarton): string | undefined {
+  return c.gtin ?? c.itemCode;
 }
 
 /**

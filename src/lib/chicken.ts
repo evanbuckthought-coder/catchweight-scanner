@@ -16,7 +16,7 @@
  */
 
 import type * as XLSXType from 'xlsx';
-import type { ParsedCarton } from './gs1';
+import { cartonKey, type ParsedCarton } from './gs1';
 import { STORAGE_KEYS, loadJSON, saveJSON, uid } from './storage';
 import { fileStamp, shareOrDownloadFile, XLSX_MIME, type ShareResult } from './shareFile';
 import { roundKg } from './units';
@@ -260,7 +260,9 @@ export function resolveChickenScan(
   existing: ChickenEntry[],
   packs: Record<string, ChickenPackProfile> = loadChickenPacks(),
 ): ScanOutcome {
-  const gtin = parsed.gtin;
+  // Identity: the GTIN on a GS1 label, or the item code a custom format map
+  // decoded from a non-GS1 barcode.
+  const gtin = cartonKey(parsed);
   if (!gtin) return { kind: 'not-gs1' };
 
   // Serial'd cartons are unique; set-weight cartons share an identical
