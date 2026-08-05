@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { parseGS1, GS, type ParsedCarton } from './gs1';
 import { SAMPLE_LABELS } from './testData';
 import { suggestSupplier } from './suppliers';
-import { roundKg } from './units';
+import { LB_TO_KG, roundKg } from './units';
 
 /** Pretty one-line summary of a parsed carton for console output. */
 function summarise(c: ParsedCarton): string {
@@ -126,5 +126,152 @@ describe('GS1-128 parser — graceful failure', () => {
     const c = parseGS1('(3102)000705(10)602030219');
     expect(c.valid).toBe(false);
     expect(c.errors.some((e) => e.includes('No GTIN'))).toBe(true);
+  });
+});
+
+describe('net-weight AI family — every decimal variant (310n kg, 320n lb)', () => {
+  const GTIN = '(01)94015433211209';
+
+  // [ai, 6-digit data, decoded value in the AI's own unit]
+  const KG_CASES: [string, string, number][] = [
+    ['3100', '000014', 14],
+    ['3101', '000144', 14.4],
+    ['3102', '001446', 14.46],
+    ['3103', '014465', 14.465],
+    ['3104', '144652', 14.4652],
+    ['3105', '146521', 1.46521],
+  ];
+  const LB_CASES: [string, string, number][] = [
+    ['3200', '000032', 32],
+    ['3201', '000320', 32],
+    ['3202', '003206', 32.06],
+    ['3203', '032065', 32.065],
+    ['3204', '320655', 32.0655],
+    ['3205', '320655', 3.20655],
+  ];
+
+  it.each(KG_CASES)('%s decodes %s as %d kg (parenthesised AND raw)', (ai, data, value) => {
+    for (const input of [`${GTIN}(${ai})${data}`, `0194015433211209${ai}${data}`]) {
+      const c = parseGS1(input);
+      expect(c.valid).toBe(true);
+      expect(c.weightAI).toBe(ai);
+      expect(c.weightUnit).toBe('kg');
+      expect(c.netWeight).toBeCloseTo(value, 6);
+      expect(c.weightKg).toBeCloseTo(value, 6);
+    }
+  });
+
+  it.each(LB_CASES)('%s decodes %s as %d lb, normalised to kg', (ai, data, value) => {
+    for (const input of [`${GTIN}(${ai})${data}`, `0194015433211209${ai}${data}`]) {
+      const c = parseGS1(input);
+      expect(c.valid).toBe(true);
+      expect(c.weightAI).toBe(ai);
+      expect(c.weightUnit).toBe('lb');
+      expect(c.netWeight).toBeCloseTo(value, 6);
+      expect(c.weightKg).toBeCloseTo(value * LB_TO_KG, 6);
+    }
+  });
+});
+
+describe('gross weight is never the carton weight', () => {
+  const GTIN = '(01)94015433211209';
+
+  it('gross-only (330n) is FLAGGED, not silently used as net', () => {
+    const c = parseGS1(`${GTIN}(3302)002694`);
+    expect(c.valid).toBe(false);
+    expect(c.weightKg).toBeUndefined();
+    expect(c.grossKg).toBeCloseTo(26.94, 3);
+    expect(c.grossAI).toBe('3302');
+    expect(c.errors.some((e) => e.includes('Only GROSS weight'))).toBe(true);
+  });
+
+  it('gross-only lb (340n) is flagged the same way', () => {
+    const c = parseGS1(`${GTIN}(3402)005941`);
+    expect(c.valid).toBe(false);
+    expect(c.grossUnit).toBe('lb');
+    expect(c.grossKg).toBeCloseTo(59.41 * LB_TO_KG, 4);
+  });
+
+  it('net + gross together -> NET is the carton weight, gross kept for reference', () => {
+    const c = parseGS1(`${GTIN}(3302)002694(3102)002246`);
+    expect(c.valid).toBe(true);
+    expect(c.weightKg).toBeCloseTo(22.46, 3);
+    expect(c.weightAI).toBe('3102');
+    expect(c.grossKg).toBeCloseTo(26.94, 3);
+  });
+
+  it('RAW scanner form: a gross weight BEFORE the net must not derail the walk', () => {
+    const raw = `01940154332112093302002694310200224610P0447`;
+    const c = parseGS1(raw);
+    expect(c.valid).toBe(true);
+    expect(c.weightKg).toBeCloseTo(22.46, 3);
+    expect(c.batch).toBe('P0447');
+    expect(c.grossKg).toBeCloseTo(26.94, 3);
+  });
+
+  it('dual-unit label (kg + lb net): kg wins regardless of order', () => {
+    const c = parseGS1(`${GTIN}(3202)003206(3102)001454`);
+    expect(c.weightUnit).toBe('kg');
+    expect(c.weightAI).toBe('3102');
+    expect(c.weightKg).toBeCloseTo(14.54, 3);
+  });
+
+  it('non-weight measures (volume, length) are ignored for weight, not fatal', () => {
+    // 3150n = net volume (litres), 3110n = length — neither is a weight.
+    const c = parseGS1(`0194015433211209315000050031100001233102002246`);
+    expect(c.valid).toBe(true);
+    expect(c.weightKg).toBeCloseTo(22.46, 3);
+    expect(c.unknownAIs.map((u) => u.ai)).toEqual(['3150', '3110']);
+  });
+});
+
+describe('diagnostics — a missed weight is visible, never silent', () => {
+  it('GTIN but no weight lists WHICH AIs were present', () => {
+    const c = parseGS1('(01)19414735674029(17)260727(10)P0447');
+    expect(c.valid).toBe(false);
+    const err = c.errors.find((e) => e.includes('No net weight'));
+    expect(err).toContain('AIs present: 01, 17, 10');
+  });
+});
+
+describe('full AI audit — everything a catchweight label carries, one raw scan', () => {
+  it('00 + 01 + 11/13/15/17 + 310n + 37 + 10 + 21 all decode together', () => {
+    const raw =
+      '00' + '345678901234567890' + // SSCC (18, fixed)
+      '01' + '94015433211209' +
+      '11' + '260607' + '13' + '260612' + '15' + '260726' + '17' + '260801' +
+      '3103' + '014465' +
+      '37' + '12' + GS + // count (variable, GS-terminated)
+      '10' + 'P0447' + GS + // batch (variable, GS-terminated)
+      '21' + '001284'; // serial (variable, end of string)
+    const c = parseGS1(raw);
+    expect(c.errors).toEqual([]);
+    expect(c.valid).toBe(true);
+    expect(c.sscc).toBe('345678901234567890');
+    expect(c.gtin).toBe('94015433211209');
+    expect(c.productionDate).toBe('2026-06-07');
+    expect(c.packagingDate).toBe('2026-06-12');
+    expect(c.bestBefore).toBe('2026-07-26');
+    expect(c.useBy).toBe('2026-08-01');
+    expect(c.weightKg).toBeCloseTo(14.465, 4);
+    expect(c.weightAI).toBe('3103');
+    expect(c.count).toBe('12');
+    expect(c.batch).toBe('P0447');
+    expect(c.serial).toBe('001284');
+    expect(c.traceAI).toBe('10'); // batch wins as trace id
+  });
+
+  it('the same AIs in a different order decode identically', () => {
+    const raw =
+      '10' + 'P0447' + GS +
+      '3103' + '014465' +
+      '01' + '94015433211209' +
+      '17' + '260801';
+    const c = parseGS1(raw);
+    expect(c.valid).toBe(true);
+    expect(c.gtin).toBe('94015433211209');
+    expect(c.weightKg).toBeCloseTo(14.465, 4);
+    expect(c.batch).toBe('P0447');
+    expect(c.useBy).toBe('2026-08-01');
   });
 });

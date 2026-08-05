@@ -29,8 +29,10 @@ const FIXED_LENGTH_AIS: Record<string, number> = {
   '17': 6, // Use by / expiry  YYMMDD
 };
 
-/** AIs whose data is variable length and therefore terminated by GS / end. */
-const VARIABLE_LENGTH_AIS = new Set(['10', '21', '37']);
+/** AIs whose data is variable length and therefore terminated by GS / end.
+ *  ('30' — variable count — is tokenised so it can't derail a label, though
+ *  we don't decode it semantically.) */
+const VARIABLE_LENGTH_AIS = new Set(['10', '21', '30', '37']);
 
 /** AIs we treat as date fields (YYMMDD -> 20YY-MM-DD). */
 const DATE_AIS: Record<string, keyof Pick<ParsedCarton,
@@ -56,13 +58,20 @@ export interface ParsedCarton {
   /** Leading 7 GTIN digits — used for the format fingerprint + supplier match. */
   companyPrefix?: string;
 
-  /** Net weight in its labelled unit (kg for 310n, lb for 320n). */
+  /** NET weight in its labelled unit (kg for 310n, lb for 320n). */
   netWeight?: number;
   weightUnit?: WeightUnit;
-  /** Always-normalised weight in kilograms. */
+  /** Always-normalised NET weight in kilograms. */
   weightKg?: number;
-  /** The weight AI actually used, e.g. "3102" or "3202". */
+  /** The net-weight AI actually used, e.g. "3102" or "3204". */
   weightAI?: string;
+
+  /** GROSS weight (AI 330n kg / 340n lb) — recorded for reference but NEVER
+   *  used as the carton weight; gross includes packaging. */
+  grossWeight?: number;
+  grossUnit?: WeightUnit;
+  grossKg?: number;
+  grossAI?: string;
 
   /** Batch / lot (AI 10). */
   batch?: string;
@@ -158,8 +167,11 @@ function tokenizeRaw(input: string): { elements: GS1Element[]; errors: string[] 
       break;
     }
 
-    // 31xx / 32xx -> 4-digit measurement AI, 6 fixed data digits.
-    if (two === '31' || two === '32') {
+    // 31xx–36xx -> the whole GS1 measurement block (net/gross weight, length,
+    // area, volume…): 4-digit AI, 6 fixed data digits. Tokenising ALL of them
+    // matters even though only weights are decoded — a gross weight or
+    // dimension transmitted BEFORE the net weight must not derail the walk.
+    if (/^3[1-6]$/.test(two)) {
       const ai = input.slice(i, i + 4);
       if (!/^\d{4}$/.test(ai)) {
         errors.push(`Malformed measurement AI "${input.slice(i, i + 4)}"`);
@@ -220,27 +232,34 @@ function buildCarton(raw: string, elements: GS1Element[], errors: string[]): Par
     valid: false,
   };
 
+  // Weight candidates are collected, not applied on sight, so precedence is
+  // deterministic regardless of the order AIs appear in the barcode.
+  type WeightCandidate = { ai: string; unit: WeightUnit; value: number };
+  const netCandidates: WeightCandidate[] = [];
+  const grossCandidates: WeightCandidate[] = [];
+
   for (const el of elements) {
     const { ai, data } = el;
 
-    // Measurement AIs: 310n (kg) / 320n (lb), n = decimal places (4th digit).
-    if (/^3[12]\d\d$/.test(ai)) {
-      const family = ai.slice(0, 3); // "310" or "320" (others are length/area/...)
-      if (family === '310' || family === '320') {
+    // Measurement block 31xx–36xx (4-digit AI, last digit = decimal places).
+    // Weights: 310n net kg, 320n net lb, 330n GROSS kg, 340n GROSS lb.
+    // Everything else in the block (length, area, volume, dimensions) is NOT
+    // a carton weight and is deliberately ignored for weight purposes.
+    if (/^3[1-6]\d\d$/.test(ai)) {
+      const family = ai.slice(0, 3);
+      const isNet = family === '310' || family === '320';
+      const isGross = family === '330' || family === '340';
+      if (isNet || isGross) {
         const n = Number(ai[3]);
-        const intVal = Number(data);
+        const intVal = /^\d+$/.test(data) ? Number(data) : NaN;
         if (!Number.isFinite(intVal)) {
           carton.errors.push(`Weight AI ${ai} has non-numeric data "${data}"`);
         } else {
-          const value = intVal / 10 ** n;
-          const unit: WeightUnit = family === '310' ? 'kg' : 'lb';
-          carton.netWeight = value;
-          carton.weightUnit = unit;
-          carton.weightKg = toKg(value, unit);
-          carton.weightAI = ai;
+          const unit: WeightUnit = family === '310' || family === '330' ? 'kg' : 'lb';
+          const candidate = { ai, unit, value: intVal / 10 ** n };
+          (isNet ? netCandidates : grossCandidates).push(candidate);
         }
       } else {
-        // A different 31xx/32xx measure (length, area, volume...) — not weight.
         carton.unknownAIs.push(el);
       }
       continue;
@@ -275,6 +294,24 @@ function buildCarton(raw: string, elements: GS1Element[], errors: string[]): Par
     }
   }
 
+  // NET weight is the carton weight; a kg AI wins over an lb one on
+  // dual-unit labels (kg is what totals are kept in — no conversion noise).
+  const net = netCandidates.find((c) => c.unit === 'kg') ?? netCandidates[0];
+  if (net) {
+    carton.netWeight = net.value;
+    carton.weightUnit = net.unit;
+    carton.weightKg = toKg(net.value, net.unit);
+    carton.weightAI = net.ai;
+  }
+  // Gross is recorded for reference only — never a substitute for net.
+  const gross = grossCandidates.find((c) => c.unit === 'kg') ?? grossCandidates[0];
+  if (gross) {
+    carton.grossWeight = gross.value;
+    carton.grossUnit = gross.unit;
+    carton.grossKg = toKg(gross.value, gross.unit);
+    carton.grossAI = gross.ai;
+  }
+
   // Traceability id: batch (10) wins over serial (21).
   if (carton.batch) {
     carton.traceId = carton.batch;
@@ -291,9 +328,23 @@ function buildCarton(raw: string, elements: GS1Element[], errors: string[]): Par
     carton.companyPrefix ?? '?',
   ].join('|');
 
-  // Minimum bar for a usable carton: a GTIN and a net weight.
+  // Minimum bar for a usable carton: a GTIN and a NET weight.
   if (!carton.gtin) carton.errors.push('No GTIN (AI 01) found');
-  if (carton.weightKg === undefined) carton.errors.push('No net weight (AI 310n/320n) found');
+  if (carton.weightKg === undefined) {
+    if (carton.grossAI) {
+      // Gross-only labels are flagged, never silently downgraded to net.
+      carton.errors.push(
+        `Only GROSS weight (AI ${carton.grossAI}) found — no net weight (310n/320n) on this barcode`,
+      );
+    } else {
+      // Diagnostic: name the AIs that WERE present, so an unhandled weight
+      // AI shows up in the error instead of being silently missed.
+      const present = elements.map((e) => e.ai).join(', ');
+      carton.errors.push(
+        `No net weight (AI 310n/320n) found${present ? ` — AIs present: ${present}` : ''}`,
+      );
+    }
+  }
   carton.valid = !!carton.gtin && carton.weightKg !== undefined;
 
   return carton;
