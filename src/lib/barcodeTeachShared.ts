@@ -10,7 +10,12 @@
  * All later decoding happens on-device from the scanner's own digits.
  */
 
-import { TEACH_MAX_IMAGE_BASE64, TEACH_MEDIA_TYPES, type TeachMediaType } from './teachShared';
+// NB: the .js extension is REQUIRED. This module is loaded by the Vercel
+// serverless function, the project is ESM ("type": "module"), and the Node
+// ESM resolver does not add extensions — an extensionless relative import
+// here kills the whole function at cold start (FUNCTION_INVOCATION_FAILED →
+// HTTP 500 for BOTH teach modes, not just this one).
+import { TEACH_MAX_IMAGE_BASE64, TEACH_MEDIA_TYPES, type TeachMediaType } from './teachShared.js';
 
 /** Longest barcode string we'll analyse (well past any real carton code). */
 export const BARCODE_MAX_DIGITS = 64;
