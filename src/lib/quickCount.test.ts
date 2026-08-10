@@ -68,6 +68,44 @@ describe('findQuickDuplicate — same-carton flag (mirrors the receival rules)',
   it('manual entries and first-release entries (no raw) never match', () => {
     expect(findQuickDuplicate([entry(22.46)], { gtin: '94015433211209', raw: rawA })).toBeUndefined();
   });
+
+  it('the real Teys brisket label is caught on a re-scan, in any scanner form', () => {
+    // (01)99332218351761(3102)001754(13)260630(21)090000400447 -> 17.54 kg.
+    const first = entry(17.54, {
+      entry: 'scan',
+      gtin: '99332218351761',
+      serial: '090000400447',
+      raw: '01993322183517613102001754132606302109000040044 7'.replace(' ', ''),
+    });
+    // A second read of the SAME carton often differs byte-for-byte (GS
+    // separators, symbology prefix), so the serial is what must catch it.
+    for (const raw of [
+      '(01)99332218351761(3102)001754(13)260630(21)090000400447',
+      ']C1019933221835176131020017541326063021090000400447',
+      '019933221835176131020017541326063021090000400447\x1d',
+    ]) {
+      expect(findQuickDuplicate([first], { gtin: '99332218351761', serial: '090000400447', raw })).toBe(first);
+    }
+  });
+
+  it('a DIFFERENT carton of the same product at the same weight still counts', () => {
+    // Two 17.54 kg cartons on one pallet is ordinary — only the serial differs.
+    const first = entry(17.54, { entry: 'scan', gtin: '99332218351761', serial: '090000400447', raw: 'a' });
+    expect(
+      findQuickDuplicate([first], { gtin: '99332218351761', serial: '090000400448', raw: 'b' }),
+    ).toBeUndefined();
+  });
+
+  it('KNOWN GAP: an entry recorded before carton IDs were stored cannot be matched', () => {
+    // Counts started before the re-scan flag shipped hold no gtin/serial/raw,
+    // so a later scan of that same carton has nothing to match against and
+    // counts again. The row now says "no carton ID recorded" so the operator
+    // can see which entries are unverifiable rather than being misled.
+    const legacy = entry(17.54, { entry: 'scan' });
+    expect(
+      findQuickDuplicate([legacy], { gtin: '99332218351761', serial: '090000400447', raw: 'x' }),
+    ).toBeUndefined();
+  });
 });
 
 describe('saved quick counts (separate from receival History)', () => {

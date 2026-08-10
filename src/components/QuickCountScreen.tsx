@@ -396,6 +396,20 @@ export function QuickCountScreen({
                     {e.unit === 'lb' ? `${e.netWeight} lb · ` : ''}
                     {e.entry === 'scan' ? 'scanned' : 'manual'}
                   </span>
+                  {/* Carton ID on the row: two cartons of the same product can
+                      genuinely weigh the same, so the serial is the only way to
+                      tell "two cartons" from "one scanned twice" at a glance. */}
+                  {e.entry === 'scan' && (
+                    <div className="truncate text-[11px] text-slate-500">
+                      {e.serial ? (
+                        <span className="font-mono">#{e.serial}</span>
+                      ) : e.raw ? (
+                        <span className="text-slate-600">no carton ID on this barcode</span>
+                      ) : (
+                        <span className="text-amber-500/80">no carton ID recorded — can’t re-scan check</span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <button
                   type="button"
