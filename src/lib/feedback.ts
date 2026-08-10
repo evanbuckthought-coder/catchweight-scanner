@@ -139,16 +139,47 @@ function vibrate(ms: number): void {
   iosHaptic();
 }
 
+// --- visual flash channel ---------------------------------------------------
+
+/**
+ * The scan overlay (ScannerView) subscribes here, so the big tick/cross fires
+ * on exactly the same events as the beeps — every existing signalSuccess /
+ * signalError call site gets the visual for free, on every screen, with no
+ * chance of the audio and the visual drifting apart.
+ */
+export type FlashKind = 'success' | 'error';
+
+const flashListeners = new Set<(kind: FlashKind) => void>();
+
+/** Subscribe to capture signals. Returns an unsubscribe function. */
+export function onSignal(listener: (kind: FlashKind) => void): () => void {
+  flashListeners.add(listener);
+  return () => flashListeners.delete(listener);
+}
+
+function emit(kind: FlashKind): void {
+  // Never let a listener's failure break capture feedback.
+  for (const l of flashListeners) {
+    try {
+      l(kind);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 // --- public signals -------------------------------------------------------
 
-/** Successful capture: crisp high beep + short haptic. */
+/** Successful capture: crisp high beep + short haptic + green tick overlay. */
 export function signalSuccess(): void {
   tone(1100, 70, 0.15, 'square');
   vibrate(40);
+  emit('success');
 }
 
-/** Failed/unreadable scan: distinct lower two-tone "buzz", no haptic. */
+/** Failed/unreadable scan: lower two-tone "buzz" + red cross overlay. */
 export function signalError(): void {
   tone(380, 90, 0.16, 'square');
   setTimeout(() => tone(220, 140, 0.16, 'square'), 100);
+  emit('error');
 }

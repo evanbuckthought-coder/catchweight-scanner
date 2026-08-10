@@ -26,3 +26,43 @@ body {
 html {
   -webkit-text-size-adjust: 100%;
 }
+
+/*
+ * Scan confirmation flash (components/ScanFlash.tsx): snap in at full
+ * strength so it's caught in peripheral vision, hold briefly, then fade out
+ * fast — the camera view must be clear again before the next carton is lined
+ * up. Slight scale-up reads as a "pop" without moving anything underneath.
+ */
+@keyframes cw-flash-fade {
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  12% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  45% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+/* Respect a reduced-motion preference: keep the signal, drop the movement. */
+@media (prefers-reduced-motion: reduce) {
+  @keyframes cw-flash-fade {
+    0%,
+    45% {
+      opacity: 1;
+      transform: none;
+    }
+    100% {
+      opacity: 0;
+      transform: none;
+    }
+  }
+}

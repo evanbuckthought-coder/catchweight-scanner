@@ -8,6 +8,7 @@ import {
 } from '../lib/scanner';
 import { OCR_REGION, recognizeVideoRegion, type OcrRead, type OcrRegion } from '../lib/ocr';
 import { useOcrEngine } from '../hooks/useOcrEngine';
+import { ScanFlash } from './ScanFlash';
 
 export type ScanMode = 'barcode' | 'ocr';
 
@@ -154,6 +155,10 @@ export function ScannerView({
       className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black ring-1 ring-slate-700"
     >
       <video ref={videoRef} playsInline muted className="h-full w-full object-cover" />
+
+      {/* Big success/failure flash. Mounted here so every screen that shows a
+          camera gets it, firing on the same signals as the capture beep. */}
+      <ScanFlash />
 
       {/* Barcode reticle */}
       {status === 'ready' && mode === 'barcode' && (
