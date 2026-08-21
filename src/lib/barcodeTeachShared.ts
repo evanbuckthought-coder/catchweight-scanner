@@ -69,13 +69,24 @@ Positions are 0-indexed into the string EXACTLY as given, counting every charact
 Return ONLY valid JSON matching the required schema — no prose, no markdown fences. Use null for anything not determinable.`;
 }
 
-/** JSON schema enforced via output_config.format. */
-const confidence = { type: 'number', minimum: 0, maximum: 1 };
+/**
+ * JSON schema enforced via output_config.format.
+ *
+ * IMPORTANT: the structured-output schema subset does NOT support numeric
+ * constraints — `minimum` / `maximum` / `exclusiveMinimum` on a number or
+ * integer are rejected with a 400 ("For 'integer' type, property 'minimum'
+ * is not supported"), which took this whole mode down in the field. Bounds
+ * are enforced in code instead: coerceBarcodeMap rejects nonsense, and
+ * validateProposedMap re-decodes the real scanned string. Keep this schema to
+ * type / enum / anyOf / required / additionalProperties — schemaKeywords.test
+ * fails the build if an unsupported keyword creeps back in.
+ */
+const confidence = { type: 'number' };
 const nullableString = { anyOf: [{ type: 'string' }, { type: 'null' }] };
 
 const baseField = {
-  start: { type: 'integer', minimum: 0 },
-  length: { type: 'integer', minimum: 1 },
+  start: { type: 'integer' },
+  length: { type: 'integer' },
   printedValueSeen: nullableString,
   confidence,
 };
@@ -114,7 +125,7 @@ export const BARCODE_OUTPUT_SCHEMA = {
   type: 'object',
   properties: {
     formatName: { type: 'string' },
-    totalLength: { type: 'integer', minimum: 1 },
+    totalLength: { type: 'integer' },
     fields: {
       type: 'object',
       properties: {
@@ -125,7 +136,7 @@ export const BARCODE_OUTPUT_SCHEMA = {
               properties: {
                 ...baseField,
                 encoding: { type: 'string', enum: ['integer', 'decimal-implied'] },
-                multiplier: { type: 'number', exclusiveMinimum: 0 },
+                multiplier: { type: 'number' },
                 unit: { type: 'string', enum: ['kg', 'lb'] },
               },
               required: ['start', 'length', 'encoding', 'multiplier', 'unit', 'printedValueSeen', 'confidence'],
@@ -145,9 +156,9 @@ export const BARCODE_OUTPUT_SCHEMA = {
     signature: {
       type: 'object',
       properties: {
-        length: { type: 'integer', minimum: 1 },
+        length: { type: 'integer' },
         prefix: nullableString,
-        prefixLength: { type: 'integer', minimum: 0 },
+        prefixLength: { type: 'integer' },
       },
       required: ['length', 'prefix', 'prefixLength'],
       additionalProperties: false,
@@ -183,6 +194,110 @@ export function extractBarcodeMapJson(text: string): unknown {
   }
   const parsed = JSON.parse(candidate) as Record<string, unknown>;
   if (typeof parsed !== 'object' || parsed === null || !('fields' in parsed) || !('signature' in parsed)) {
+    throw new Error('AI response missing expected fields');
+  }
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// UNSCANNABLE mode — the barcode won't scan at all
+// ---------------------------------------------------------------------------
+
+/**
+ * When a barcode is damaged, missing, or simply won't read, there is no digit
+ * string to derive a format map from. This mode instead reads THIS carton's
+ * printed values off the photo, for the human to confirm before anything is
+ * counted.
+ *
+ * Consequences, deliberately: no format map is saved (there are no scanned
+ * positions to learn), and the resulting carton is flagged as AI-assisted —
+ * never as a scanned value — in the session and the export.
+ */
+export interface CartonReadRequestBody {
+  mode: 'carton';
+  image: string;
+  mediaType: TeachMediaType;
+}
+
+export function validateCartonReadRequest(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return 'Body must be a JSON object';
+  const b = body as Record<string, unknown>;
+  if (typeof b.image !== 'string' || b.image.length === 0) return 'Missing image';
+  if (b.image.length > TEACH_MAX_IMAGE_BASE64) return 'Image too large — retake at a lower resolution';
+  if (!/^[A-Za-z0-9+/=]+$/.test(b.image.slice(0, 1000))) return 'Image must be base64 (no data: prefix)';
+  if (!TEACH_MEDIA_TYPES.includes(b.mediaType as TeachMediaType)) return 'Unsupported image type';
+  return null;
+}
+
+export const CARTON_READ_PROMPT = `This is a photo of a meat carton label whose barcode cannot be scanned. Read the values PRINTED on this specific carton so a human can check them and record the carton by hand.
+
+Read exactly what is printed — do not infer, round, or calculate:
+- netWeightPrinted: the NET weight exactly as printed, including its unit (e.g. "17.54 KG"). Use the NET weight only, never gross or tare. If the label prints both kg and lb, use the kg figure.
+- netWeightValue: that same net weight as a number, in the unit you report below.
+- unit: "kg" or "lb" — whichever netWeightValue is in.
+- productionDate / bestBefore / useBy: each as YYYY-MM-DD if a date is printed, else null. Convert printed forms like "30/JUN/2026" or "06 JUL 26" to YYYY-MM-DD. Assume the 2000s for two-digit years.
+- product: the product description as printed.
+- productCode: the item/product code printed on the label, if any.
+- batch: the batch/lot number if printed.
+- serial: a per-carton serial or carton number if printed.
+- confidence: 0-1, how confident you are in netWeightValue specifically.
+- notes: anything that makes the weight hard to read (glare, creasing, partly obscured), or null.
+
+If the net weight is not legible, set netWeightValue and netWeightPrinted to null rather than guessing — a wrong weight is far worse than no weight.
+
+Return ONLY valid JSON matching the required schema — no prose, no markdown fences.`;
+
+export const CARTON_READ_SCHEMA = {
+  type: 'object',
+  properties: {
+    netWeightPrinted: nullableString,
+    netWeightValue: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+    unit: { anyOf: [{ type: 'string', enum: ['kg', 'lb'] }, { type: 'null' }] },
+    productionDate: nullableString,
+    bestBefore: nullableString,
+    useBy: nullableString,
+    product: nullableString,
+    productCode: nullableString,
+    batch: nullableString,
+    serial: nullableString,
+    confidence: { type: 'number' },
+    notes: nullableString,
+  },
+  required: [
+    'netWeightPrinted', 'netWeightValue', 'unit', 'productionDate', 'bestBefore',
+    'useBy', 'product', 'productCode', 'batch', 'serial', 'confidence', 'notes',
+  ],
+  additionalProperties: false,
+} as const;
+
+/** What the AI read off an unscannable carton's label. Values are PROPOSALS. */
+export interface CartonRead {
+  netWeightPrinted: string | null;
+  netWeightValue: number | null;
+  unit: 'kg' | 'lb' | null;
+  productionDate: string | null;
+  bestBefore: string | null;
+  useBy: string | null;
+  product: string | null;
+  productCode: string | null;
+  batch: string | null;
+  serial: string | null;
+  confidence: number;
+  notes: string | null;
+}
+
+export function extractCartonReadJson(text: string): CartonRead {
+  let candidate = text.trim();
+  const fence = candidate.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) candidate = fence[1].trim();
+  if (!candidate.startsWith('{')) {
+    const start = candidate.indexOf('{');
+    const end = candidate.lastIndexOf('}');
+    if (start === -1 || end <= start) throw new Error('No JSON object in AI response');
+    candidate = candidate.slice(start, end + 1);
+  }
+  const parsed = JSON.parse(candidate) as CartonRead;
+  if (typeof parsed !== 'object' || parsed === null || !('netWeightValue' in parsed)) {
     throw new Error('AI response missing expected fields');
   }
   return parsed;

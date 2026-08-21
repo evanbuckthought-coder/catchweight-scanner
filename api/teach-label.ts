@@ -27,9 +27,13 @@ import {
 } from '../src/lib/teachShared.js';
 import {
   BARCODE_OUTPUT_SCHEMA,
+  CARTON_READ_PROMPT,
+  CARTON_READ_SCHEMA,
   barcodePrompt,
   extractBarcodeMapJson,
+  extractCartonReadJson,
   validateBarcodeTeachRequest,
+  validateCartonReadRequest,
   type BarcodeTeachRequestBody,
 } from '../src/lib/barcodeTeachShared.js';
 
@@ -63,9 +67,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   //  - 'label'   (default): learn a label's LAYOUT for OCR/description
   //  - 'barcode':           learn a non-GS1 barcode's FORMAT MAP
   // Both teach structure only; neither returns a value that gets counted.
-  const barcodeMode = (req.body as { mode?: string } | null)?.mode === 'barcode';
+  const mode = (req.body as { mode?: string } | null)?.mode;
+  const barcodeMode = mode === 'barcode';
+  // 'carton': the barcode won't scan at all, so there is no digit string —
+  // read THIS carton's printed values for the human to confirm instead.
+  const cartonMode = mode === 'carton';
 
-  const invalid = barcodeMode ? validateBarcodeTeachRequest(req.body) : validateTeachRequest(req.body);
+  const invalid = barcodeMode
+    ? validateBarcodeTeachRequest(req.body)
+    : cartonMode
+      ? validateCartonReadRequest(req.body)
+      : validateTeachRequest(req.body);
   if (invalid) {
     res.status(400).json({ error: invalid });
     return;
@@ -74,10 +86,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const { image, mediaType } = req.body as TeachRequestBody | BarcodeTeachRequestBody;
   const hint = barcodeMode ? undefined : (req.body as TeachRequestBody).hint;
 
-  const schema = barcodeMode ? BARCODE_OUTPUT_SCHEMA : TEACH_OUTPUT_SCHEMA;
+  const schema = barcodeMode ? BARCODE_OUTPUT_SCHEMA : cartonMode ? CARTON_READ_SCHEMA : TEACH_OUTPUT_SCHEMA;
   const userText = barcodeMode
     ? barcodePrompt((req.body as BarcodeTeachRequestBody).digits)
-    : hint?.trim()
+    : cartonMode
+      ? CARTON_READ_PROMPT
+      : hint?.trim()
       ? `${TEACH_PROMPT}\n\nHint from the operator about this label: ${hint.trim()}`
       : TEACH_PROMPT;
 
@@ -152,7 +166,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     res.status(200).json({
       ok: true,
-      result: barcodeMode ? extractBarcodeMapJson(text) : extractTeachJson(text),
+      result: barcodeMode
+        ? extractBarcodeMapJson(text)
+        : cartonMode
+          ? extractCartonReadJson(text)
+          : extractTeachJson(text),
     });
   } catch (err) {
     console.error('teach-label failed', err);

@@ -10,10 +10,12 @@
  */
 
 import {
+  TEACH_MAX_IMAGE_BASE64,
   TEACH_SECRET_HEADER,
   type TeachMediaType,
   type TeachResult,
 } from './teachShared';
+import type { CartonRead } from './barcodeTeachShared';
 
 /**
  * Shared secret sent as the x-teach-secret header. Like the passcode, this
@@ -25,6 +27,17 @@ export const TEACH_SECRET = 'cw-teach-903c3bb2759f9b90a87415ae5b6c7b4f';
 
 const MAX_EDGE = 1600;
 const JPEG_QUALITY = 0.8;
+/**
+ * Re-encode steps used if the first pass is still too big for the endpoint.
+ * A 4-figure-megapixel phone photo of a glossy label can stay large even at
+ * q0.8, and an oversized body is rejected before any AI call is made — so we
+ * shrink rather than fire a request that is guaranteed to fail.
+ */
+const FALLBACK_STEPS: { edge: number; quality: number }[] = [
+  { edge: 1280, quality: 0.72 },
+  { edge: 1024, quality: 0.65 },
+  { edge: 800, quality: 0.6 },
+];
 
 export interface CompressedLabelImage {
   base64: string; // no data: prefix
@@ -70,26 +83,44 @@ async function decodeImage(file: Blob): Promise<{ source: CanvasImageSource; wid
 export async function compressLabelImage(file: Blob): Promise<CompressedLabelImage> {
   const { source, width, height, cleanup } = await decodeImage(file);
   try {
-    const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
-    const w = Math.max(1, Math.round(width * scale));
-    const h = Math.max(1, Math.round(height * scale));
+    if (!width || !height) {
+      throw new Error('That photo has no image data — take it again.');
+    }
 
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Canvas unavailable on this device');
-    ctx.drawImage(source, 0, 0, w, h);
+    const encode = (maxEdge: number, quality: number): CompressedLabelImage => {
+      const scale = Math.min(1, maxEdge / Math.max(width, height));
+      const w = Math.max(1, Math.round(width * scale));
+      const h = Math.max(1, Math.round(height * scale));
 
-    const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
-    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    return {
-      base64,
-      mediaType: 'image/jpeg',
-      width: w,
-      height: h,
-      bytes: Math.round(base64.length * 0.75),
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas unavailable on this device');
+      ctx.drawImage(source, 0, 0, w, h);
+
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      if (!dataUrl.startsWith('data:image/jpeg')) {
+        throw new Error('This device could not encode the photo — try again.');
+      }
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      return { base64, mediaType: 'image/jpeg', width: w, height: h, bytes: Math.round(base64.length * 0.75) };
     };
+
+    let out = encode(MAX_EDGE, JPEG_QUALITY);
+    // Shrink until it comfortably fits the endpoint's cap, rather than
+    // sending a body that will be refused.
+    for (const step of FALLBACK_STEPS) {
+      if (out.base64.length <= TEACH_MAX_IMAGE_BASE64) break;
+      out = encode(step.edge, step.quality);
+    }
+    if (out.base64.length > TEACH_MAX_IMAGE_BASE64) {
+      throw new Error('That photo is too large even after compression — take a closer, tighter shot of the label.');
+    }
+    if (out.base64.length < 1024) {
+      throw new Error('That photo came out blank — take it again with the label in frame.');
+    }
+    return out;
   } finally {
     cleanup();
   }
@@ -97,6 +128,42 @@ export async function compressLabelImage(file: Blob): Promise<CompressedLabelIma
 
 /** Error whose message is safe to show verbatim on the teach screen. */
 export class TeachError extends Error {}
+
+/**
+ * One POST to the teach endpoint, with the failure message the operator will
+ * actually see.
+ *
+ * The upstream `detail` is appended when present: a bare "AI service error
+ * (400)" is undiagnosable on a phone in a chiller, whereas the real message
+ * ("...property 'minimum' is not supported") points straight at the cause.
+ */
+async function postTeach<T>(body: Record<string, unknown>, offlineMessage: string): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch('/api/teach-label', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [TEACH_SECRET_HEADER]: TEACH_SECRET,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new TeachError(offlineMessage);
+  }
+
+  const parsed = (await res.json().catch(() => null)) as
+    | { ok?: boolean; result?: T; error?: string; detail?: string }
+    | null;
+
+  if (!res.ok || !parsed?.ok || !parsed.result) {
+    const base = parsed?.error ?? `Analysis failed (HTTP ${res.status}) — try again.`;
+    const detail = parsed?.detail?.trim();
+    if (detail) console.warn('teach endpoint detail:', detail);
+    throw new TeachError(detail ? `${base}\n\nDetail: ${detail}` : base);
+  }
+  return parsed.result;
+}
 
 /**
  * Send the compressed label photo (+ optional hint) for analysis.
@@ -107,32 +174,14 @@ export async function analyseLabel(
   image: CompressedLabelImage,
   hint: string | undefined,
 ): Promise<TeachResult> {
-  let res: Response;
-  try {
-    res = await fetch('/api/teach-label', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        [TEACH_SECRET_HEADER]: TEACH_SECRET,
-      },
-      body: JSON.stringify({
-        image: image.base64,
-        mediaType: image.mediaType,
-        ...(hint?.trim() ? { hint: hint.trim() } : {}),
-      }),
-    });
-  } catch {
-    throw new TeachError('No connection — teaching needs internet. Check connectivity and retry.');
-  }
-
-  const body = (await res.json().catch(() => null)) as
-    | { ok?: boolean; result?: TeachResult; error?: string }
-    | null;
-
-  if (!res.ok || !body?.ok || !body.result) {
-    throw new TeachError(body?.error ?? `Analysis failed (HTTP ${res.status}) — try again.`);
-  }
-  return body.result;
+  return postTeach<TeachResult>(
+    {
+      image: image.base64,
+      mediaType: image.mediaType,
+      ...(hint?.trim() ? { hint: hint.trim() } : {}),
+    },
+    'No connection — teaching needs internet. Check connectivity and retry.',
+  );
 }
 
 /**
@@ -143,35 +192,23 @@ export async function analyseLabel(
  * (positions/encodings); the caller re-decodes the scanner's own digits
  * on-device and validates before anything is saved or counted.
  */
-export async function analyseBarcode(
-  image: CompressedLabelImage,
-  digits: string,
-): Promise<unknown> {
-  let res: Response;
-  try {
-    res = await fetch('/api/teach-label', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        [TEACH_SECRET_HEADER]: TEACH_SECRET,
-      },
-      body: JSON.stringify({
-        mode: 'barcode',
-        image: image.base64,
-        mediaType: image.mediaType,
-        digits,
-      }),
-    });
-  } catch {
-    throw new TeachError('No connection — analysing a barcode needs internet. Check connectivity and retry.');
-  }
+export async function analyseBarcode(image: CompressedLabelImage, digits: string): Promise<unknown> {
+  return postTeach<unknown>(
+    { mode: 'barcode', image: image.base64, mediaType: image.mediaType, digits },
+    'No connection — analysing a barcode needs internet. Check connectivity and retry.',
+  );
+}
 
-  const body = (await res.json().catch(() => null)) as
-    | { ok?: boolean; result?: unknown; error?: string }
-    | null;
-
-  if (!res.ok || !body?.ok || !body.result) {
-    throw new TeachError(body?.error ?? `Analysis failed (HTTP ${res.status}) — try again.`);
-  }
-  return body.result;
+/**
+ * UNSCANNABLE barcode: read THIS carton's printed values off the photo.
+ *
+ * There is no scanned digit string here, so no format map can be (or is)
+ * learned. Everything returned is a PROPOSAL for the human to confirm, and the
+ * resulting carton is recorded as AI-assisted, never as a scanned value.
+ */
+export async function readCarton(image: CompressedLabelImage): Promise<CartonRead> {
+  return postTeach<CartonRead>(
+    { mode: 'carton', image: image.base64, mediaType: image.mediaType },
+    'No connection — reading a label needs internet. Check connectivity and retry.',
+  );
 }

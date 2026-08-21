@@ -225,14 +225,26 @@ export function QuickCountScreen({
         <div className="text-sm font-bold text-slate-100">⚡ Quick Count</div>
         <div className="truncate text-xs text-slate-500">weight tally · not a receival</div>
       </div>
-      <button
-        type="button"
-        data-testid="quick-view-saved"
-        onClick={onViewSaved}
-        className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-slate-300 ring-1 ring-slate-600"
-      >
-        🗂 Saved{savedCount ? ` (${savedCount})` : ''}
-      </button>
+      <div className="flex shrink-0 gap-1.5">
+        {/* Direct way in when a barcode plainly won't scan — no need to fail
+            repeatedly first. */}
+        <button
+          type="button"
+          data-testid="quick-analyse"
+          onClick={() => setTeachRaw({ raw: '', reason: '' })}
+          className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-indigo-300 ring-1 ring-slate-600"
+        >
+          🤖 Analyse
+        </button>
+        <button
+          type="button"
+          data-testid="quick-view-saved"
+          onClick={onViewSaved}
+          className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-slate-300 ring-1 ring-slate-600"
+        >
+          🗂 Saved{savedCount ? ` (${savedCount})` : ''}
+        </button>
+      </div>
     </header>
   );
 
@@ -394,7 +406,7 @@ export function QuickCountScreen({
                   </span>
                   <span className="ml-2 text-xs text-slate-500">
                     {e.unit === 'lb' ? `${e.netWeight} lb · ` : ''}
-                    {e.entry === 'scan' ? 'scanned' : 'manual'}
+                    {e.entry === 'scan' ? 'scanned' : e.entry === 'ai' ? 'AI photo · confirmed' : 'manual'}
                   </span>
                   {/* Carton ID on the row: two cartons of the same product can
                       genuinely weigh the same, so the serial is the only way to
@@ -476,6 +488,13 @@ export function QuickCountScreen({
         <BarcodeTeachFlow
           raw={teachRaw.raw}
           reason={teachRaw.reason}
+          onCartonRead={(carton) => {
+            // Unscannable label: AI read it, human confirmed it. Recorded as
+            // AI-assisted — never as a scan — and it teaches nothing.
+            addWeight(carton.netWeight, carton.unit, 'ai');
+            setFeedback(`+ ${roundKg(carton.weightKg).toFixed(2)} kg (AI photo, confirmed)`);
+            setTeachRaw(null);
+          }}
           onSaved={(decoded, map) => {
             countScan(
               teachRaw.raw,

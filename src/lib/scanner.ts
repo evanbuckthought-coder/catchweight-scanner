@@ -22,6 +22,7 @@ import {
 // Load the wasm binary as a bundled, hashed asset URL (deterministic across
 // hosts) rather than relying on the package's own import.meta.url resolution.
 import wasmUrl from '@undecaf/zbar-wasm/dist/zbar.wasm?url';
+import { parseGS1 } from './gs1';
 
 let wasmReady: Promise<void> | null = null;
 
@@ -98,13 +99,82 @@ export function stopCamera(stream: MediaStream | null): void {
 }
 
 /**
+ * The capture box (green reticle) expressed as fractions of the VIDEO FRAME,
+ * origin top-left. Decodes whose centre falls outside are ignored.
+ */
+export interface ScanRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Is this symbol's centre inside the capture box?
+ *
+ * Meat cartons routinely carry several barcodes — a Fribin label has an EAN
+ * top-right and the GS1-128 along the bottom — and ZBar happily returns all of
+ * them, so the app kept acting on whichever it saw first. Position filtering
+ * makes the green box mean what operators assume it means: only what you line
+ * up is read. The CENTRE is tested (not full containment) so a long barcode
+ * whose ends overhang the box still counts, while a different barcode
+ * elsewhere in frame does not.
+ *
+ * A symbol with no position data is kept — better an occasional extra decode
+ * than a scanner that silently reads nothing.
+ */
+export function symbolInRegion(
+  symbol: Pick<ZBarSymbol, 'points'>,
+  region: ScanRegion,
+  frameWidth: number,
+  frameHeight: number,
+): boolean {
+  const points = symbol.points;
+  if (!points || points.length === 0) return true;
+  let sx = 0;
+  let sy = 0;
+  for (const p of points) {
+    sx += p.x;
+    sy += p.y;
+  }
+  const cx = sx / points.length / frameWidth;
+  const cy = sy / points.length / frameHeight;
+  return (
+    cx >= region.x &&
+    cx <= region.x + region.width &&
+    cy >= region.y &&
+    cy <= region.y + region.height
+  );
+}
+
+/**
+ * Belt and braces for a frame that still yields several barcodes: put the ones
+ * that parse as GS1 with a GTIN first, so the caller acts on the carton
+ * barcode rather than an EAN or an internal code.
+ */
+export function orderByGs1Preference(decoded: string[]): string[] {
+  const score = (raw: string) => {
+    const p = parseGS1(raw);
+    if (p.valid) return 0; // GS1 with a GTIN and a weight
+    if (p.gtin) return 1; // GS1 with a GTIN
+    return 2;
+  };
+  return decoded
+    .map((raw, i) => ({ raw, i, s: score(raw) }))
+    .sort((a, b) => a.s - b.s || a.i - b.i)
+    .map((x) => x.raw);
+}
+
+/**
  * Decode CODE-128 symbols from one video frame. Returns the decoded data
  * strings (control chars like the FNC1/GS separator preserved) for the caller
- * to parse. Reuses one canvas across calls.
+ * to parse. Reuses one canvas across calls. When `region` is given, only
+ * symbols centred inside it are returned.
  */
 export async function scanVideoFrame(
   video: HTMLVideoElement,
   canvas: HTMLCanvasElement,
+  region?: ScanRegion,
 ): Promise<string[]> {
   const w = video.videoWidth;
   const h = video.videoHeight;
@@ -118,9 +188,9 @@ export async function scanVideoFrame(
   const imageData = ctx.getImageData(0, 0, w, h);
 
   const symbols: ZBarSymbol[] = await scanImageData(imageData);
-  return symbols
-    .filter((s) => s.type === ZBarSymbolType.ZBAR_CODE128)
-    .map((s) => s.decode());
+  const code128 = symbols.filter((s) => s.type === ZBarSymbolType.ZBAR_CODE128);
+  const inBox = region ? code128.filter((s) => symbolInRegion(s, region, w, h)) : code128;
+  return orderByGs1Preference(inBox.map((s) => s.decode()));
 }
 
 export interface ScanLoopOptions {
@@ -130,6 +200,12 @@ export interface ScanLoopOptions {
   /** Min ms between scan attempts (throttle CPU). Default 250ms. */
   intervalMs?: number;
   onError?: (err: unknown) => void;
+  /**
+   * Live accessor for the capture box (the green reticle), in VIDEO-FRAME
+   * fractions. A function rather than a value so the loop always uses the
+   * current layout without being torn down on every resize.
+   */
+  getRegion?: () => ScanRegion | undefined;
 }
 
 /**
@@ -138,6 +214,7 @@ export interface ScanLoopOptions {
  */
 export function runScanLoop(opts: ScanLoopOptions): () => void {
   const { video, onDecode, onError, intervalMs = 250 } = opts;
+  void opts.getRegion;
   const canvas = document.createElement('canvas');
   let stopped = false;
   let busy = false;
@@ -150,7 +227,7 @@ export function runScanLoop(opts: ScanLoopOptions): () => void {
       lastRun = ts;
       busy = true;
       try {
-        const results = await scanVideoFrame(video, canvas);
+        const results = await scanVideoFrame(video, canvas, opts.getRegion?.());
         for (const data of results) onDecode(data);
       } catch (err) {
         onError?.(err);

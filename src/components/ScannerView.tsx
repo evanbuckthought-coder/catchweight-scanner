@@ -5,6 +5,7 @@ import {
   runScanLoop,
   startCamera,
   stopCamera,
+  type ScanRegion,
 } from '../lib/scanner';
 import { OCR_REGION, recognizeVideoRegion, type OcrRead, type OcrRegion } from '../lib/ocr';
 import { useOcrEngine } from '../hooks/useOcrEngine';
@@ -54,6 +55,8 @@ export function ScannerView({
 }: ScannerViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<Status>('idle');
   const [error, setError] = useState<string>('');
   const [retryNonce, setRetryNonce] = useState(0);
@@ -112,6 +115,42 @@ export function ScannerView({
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [active]);
 
+  /**
+   * The green box in VIDEO-FRAME fractions, so only what the operator lines up
+   * is decoded. The <video> is object-cover, so the frame is scaled to fill the
+   * container and centre-cropped — that crop has to be undone here or the box
+   * would map to the wrong part of the frame on any non-matching aspect ratio.
+   */
+  const getRegion = (): ScanRegion | undefined => {
+    const video = videoRef.current;
+    const box = boxRef.current;
+    const container = containerRef.current;
+    if (!video || !box || !container) return undefined;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const cRect = container.getBoundingClientRect();
+    const bRect = box.getBoundingClientRect();
+    if (!vw || !vh || !cRect.width || !cRect.height) return undefined;
+
+    // object-cover: the frame is scaled by the LARGER ratio, then centred.
+    const scale = Math.max(cRect.width / vw, cRect.height / vh);
+    const visibleW = cRect.width / scale;
+    const visibleH = cRect.height / scale;
+    const originX = (vw - visibleW) / 2;
+    const originY = (vh - visibleH) / 2;
+
+    const x = originX + (bRect.left - cRect.left) / scale;
+    const y = originY + (bRect.top - cRect.top) / scale;
+    return {
+      x: x / vw,
+      y: y / vh,
+      width: bRect.width / scale / vw,
+      height: bRect.height / scale / vh,
+    };
+  };
+  const getRegionRef = useRef(getRegion);
+  getRegionRef.current = getRegion;
+
   // Barcode scan loop.
   useEffect(() => {
     if (mode !== 'barcode' || status !== 'ready' || paused || !active) return;
@@ -121,6 +160,7 @@ export function ScannerView({
       video,
       onDecode,
       onError: (err) => console.warn('scan tick failed:', err),
+      getRegion: () => getRegionRef.current(),
     });
     return stop;
   }, [mode, status, paused, active, onDecode]);
@@ -151,6 +191,7 @@ export function ScannerView({
 
   return (
     <div
+      ref={containerRef}
       data-ocr-engine={mode === 'ocr' ? ocr.status : undefined}
       className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl bg-black ring-1 ring-slate-700"
     >
@@ -160,14 +201,21 @@ export function ScannerView({
           camera gets it, firing on the same signals as the capture beep. */}
       <ScanFlash />
 
-      {/* Barcode reticle */}
+      {/* Barcode reticle. ONLY what sits inside this box is decoded (see
+          getRegion), so it is dimmed outside and labelled — on a label with
+          several barcodes the operator has to know which one is being read. */}
       {status === 'ready' && mode === 'barcode' && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
           <div
-            className={`h-28 w-4/5 rounded-xl border-2 ${
-              paused ? 'border-amber-400/70' : 'border-emerald-400/80'
-            }`}
+            ref={boxRef}
+            data-testid="scan-box"
+            className={`h-32 w-[86%] rounded-xl border-2 ${
+              paused ? 'border-amber-400/70' : 'border-emerald-400'
+            } shadow-[0_0_0_9999px_rgba(2,6,23,0.45)]`}
           />
+          <span className="mt-2 rounded-full bg-slate-900/75 px-2.5 py-1 text-[11px] font-medium text-slate-300">
+            line up ONE barcode in the box
+          </span>
         </div>
       )}
 

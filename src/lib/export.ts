@@ -54,6 +54,7 @@ type Row = (string | number)[];
 const ENTRY_LABEL: Record<Pallet['cartons'][number]['entry'], string> = {
   scan: 'Scanned',
   ocr: 'OCR',
+  ai: 'AI photo (confirmed)',
   manual: 'Manual',
 };
 

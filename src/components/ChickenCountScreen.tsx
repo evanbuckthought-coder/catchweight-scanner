@@ -11,6 +11,7 @@ import { BarcodeTeachFlow } from './BarcodeTeachFlow';
 import { BarcodeConfirmSheet } from './BarcodeConfirmSheet';
 import { getProfile } from '../lib/profiles';
 import { createScanGate } from '../lib/scanGate';
+import { uid } from '../lib/storage';
 import { roundKg } from '../lib/units';
 import { signalError, signalSuccess } from '../lib/feedback';
 import {
@@ -338,6 +339,18 @@ export function ChickenCountScreen({
         >
           📷 Teach
         </button>
+        {/* Direct way in when a barcode plainly won't scan. */}
+        <button
+          type="button"
+          data-testid="chicken-analyse"
+          onClick={() => {
+            sheetGateRef.current = true;
+            setTeachRaw({ raw: '', reason: '' });
+          }}
+          className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-indigo-300 ring-1 ring-slate-600"
+        >
+          🤖 Analyse
+        </button>
         <button
           type="button"
           data-testid="chicken-view-saved"
@@ -588,6 +601,28 @@ export function ChickenCountScreen({
         <BarcodeTeachFlow
           raw={teachRaw.raw}
           reason={teachRaw.reason}
+          onCartonRead={(carton) => {
+            // Unscannable label: AI read it, human confirmed it. Counted as an
+            // AI-assisted carton — its own weight, never a scan, teaches
+            // nothing. Keyed by the printed product code when there is one.
+            const entry: ChickenEntry = {
+              id: uid(),
+              time: new Date().toISOString(),
+              gtin: carton.productCode ?? '',
+              product: carton.product ?? '',
+              weightKg: carton.weightKg,
+              weightSource: 'ai',
+              productionDate: carton.productionDate,
+              bestBefore: carton.bestBefore,
+              useBy: carton.useBy,
+              batch: carton.batch,
+              serial: carton.serial,
+              raw: '',
+            };
+            setTeachRaw(null);
+            sheetGateRef.current = false;
+            countEntry(entry);
+          }}
           onSaved={(decoded, map) => {
             // Re-run the normal chicken rules with the decoded carton, so a
             // custom-format product still gets named/typed like any other.

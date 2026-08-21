@@ -1,11 +1,15 @@
 import { useMemo, useRef, useState } from 'react';
-import { analyseBarcode, compressLabelImage, TeachError, type CompressedLabelImage } from '../lib/teach';
+import { analyseBarcode, compressLabelImage, readCarton, TeachError, type CompressedLabelImage } from '../lib/teach';
+import type { CartonRead } from '../lib/barcodeTeachShared';
 import {
   coerceBarcodeMap,
   markMapConfirmed,
   saveBarcodeMap,
   validateProposedMap,
   type BarcodeFormatMap,
+  MAX_CARTON_KG,
+  MIN_CARTON_KG,
+  type ConfirmedCartonRead,
   type DecodedBarcode,
   type SavedBarcodeMap,
 } from '../lib/barcodeMaps';
@@ -13,11 +17,18 @@ import { roundKg } from '../lib/units';
 
 interface BarcodeTeachFlowProps {
   /** The EXACT string the scanner read — the only source of counted digits. */
+  /** Empty when the barcode won't scan at all — the UNSCANNABLE path. */
   raw: string;
   /** Why the parser couldn't read it (shown so the operator has context). */
   reason?: string;
   /** Saved + confirmed: the caller counts this carton from `decoded`. */
   onSaved: (decoded: DecodedBarcode, map: SavedBarcodeMap) => void;
+  /**
+   * Unscannable path: the AI read THIS carton's printed values and the human
+   * confirmed them. No format map is saved (there are no scanned positions to
+   * learn from), and the caller must record it as AI-assisted, not scanned.
+   */
+  onCartonRead?: (carton: ConfirmedCartonRead) => void;
   /** Switch to keying the weight by hand (always available, works offline). */
   onManual: () => void;
   onCancel: () => void;
@@ -35,8 +46,11 @@ type Step = 'offer' | 'photo' | 'review' | 'analysing' | 'confirm';
  * failing) nothing is saved. What the human confirms on the last screen is
  * the ON-DEVICE decode, not the AI's reading.
  */
-export function BarcodeTeachFlow({ raw, reason, onSaved, onManual, onCancel }: BarcodeTeachFlowProps) {
+export function BarcodeTeachFlow({ raw, reason, onSaved, onCartonRead, onManual, onCancel }: BarcodeTeachFlowProps) {
+  /** No scanned string -> read this carton's printed values instead. */
+  const unscannable = raw.trim() === '';
   const [step, setStep] = useState<Step>('offer');
+  const [cartonRead, setCartonRead] = useState<CartonRead | null>(null);
   const [image, setImage] = useState<CompressedLabelImage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [map, setMap] = useState<BarcodeFormatMap | null>(null);
@@ -70,6 +84,24 @@ export function BarcodeTeachFlow({ raw, reason, onSaved, onManual, onCancel }: B
     setError(null);
     setStep('analysing');
     try {
+      // UNSCANNABLE: no digits to map, so read this carton's printed values.
+      if (unscannable) {
+        const read = await readCarton(image);
+        if (read.netWeightValue == null || !Number.isFinite(read.netWeightValue)) {
+          setError(
+            'The AI could not read a net weight on that photo' +
+              (read.notes ? ` (${read.notes})` : '') +
+              ' — retake it closer, or enter the weight by hand.',
+          );
+          setStep('review');
+          return;
+        }
+        setCartonRead(read);
+        setWeightEdit(String(read.netWeightValue));
+        setDateEdit(read.productionDate ?? '');
+        setStep('confirm');
+        return;
+      }
       const proposed = coerceBarcodeMap(await analyseBarcode(image, raw.trim()));
       if (!proposed) {
         setError('The AI didn’t return a usable barcode format — try a sharper photo of the whole label.');
@@ -96,6 +128,28 @@ export function BarcodeTeachFlow({ raw, reason, onSaved, onManual, onCancel }: B
     } finally {
       inFlightRef.current = false;
     }
+  };
+
+  /** Unscannable path: hand the human-confirmed values back, save no map. */
+  const saveCartonRead = () => {
+    if (!cartonRead || !onCartonRead) return;
+    const value = Number(weightEdit);
+    if (!Number.isFinite(value) || value <= 0) return;
+    const unit = cartonRead.unit ?? 'kg';
+    const weightKg = unit === 'lb' ? value * 0.45359237 : value;
+    onCartonRead({
+      weightKg,
+      netWeight: value,
+      unit,
+      productionDate: dateEdit || undefined,
+      bestBefore: cartonRead.bestBefore ?? undefined,
+      useBy: cartonRead.useBy ?? undefined,
+      product: cartonRead.product ?? undefined,
+      productCode: cartonRead.productCode ?? undefined,
+      batch: cartonRead.batch ?? undefined,
+      serial: cartonRead.serial ?? undefined,
+      printedWeight: cartonRead.netWeightPrinted ?? undefined,
+    });
   };
 
   const save = () => {
@@ -151,23 +205,34 @@ export function BarcodeTeachFlow({ raw, reason, onSaved, onManual, onCancel }: B
   // ---- 1. Offer: AI analysis or manual --------------------------------------
   if (step === 'offer') {
     return shell(
-      'Barcode not recognised',
+      unscannable ? 'Barcode won’t scan' : 'Barcode not recognised',
       <>
         <p className="mt-1 text-sm text-slate-400">
-          {reason ?? 'This isn’t a GS1 barcode the app can read.'} If the carton’s weight is printed
-          on the label, the AI can work out how this barcode is laid out — once per format, then it
-          scans normally offline.
+          {unscannable ? (
+            <>
+              Nothing to scan — damaged, missing or unreadable barcode. The AI can read this carton’s
+              printed weight and dates instead, for you to check before it counts. It is recorded as
+              an <span className="font-semibold text-slate-200">AI-assisted</span> entry, not a scan,
+              and no barcode format is learned.
+            </>
+          ) : (
+            <>
+              {reason ?? 'This isn’t a GS1 barcode the app can read.'} If the carton’s weight is
+              printed on the label, the AI can work out how this barcode is laid out — once per
+              format, then it scans normally offline.
+            </>
+          )}
         </p>
-        {scannedBox}
+        {!unscannable && scannedBox}
         <button
           type="button"
           data-testid="barcode-teach-start"
           onClick={() => setStep('photo')}
           className="mt-4 h-14 w-full rounded-xl bg-indigo-500 text-base font-bold text-white active:bg-indigo-400"
         >
-          🤖 Analyse barcode with AI
+          {unscannable ? '🤖 Read this label with AI' : '🤖 Analyse barcode with AI'}
           <span className="block text-[11px] font-medium text-indigo-100/80">
-            needs internet · once per barcode format
+            {unscannable ? 'needs internet · this carton only' : 'needs internet · once per barcode format'}
           </span>
         </button>
         <button
@@ -189,10 +254,12 @@ export function BarcodeTeachFlow({ raw, reason, onSaved, onManual, onCancel }: B
       <>
         <p className="mt-1 text-sm text-slate-400">
           Capture the <span className="font-semibold text-slate-200">whole label</span> so the printed
-          net weight, dates and product code are readable. The AI matches those printed values against
-          the scanned digits to work out the format.
+          net weight, dates and product code are readable.
+          {unscannable
+            ? ' Get close enough that the NET WEIGHT is sharp — that is the number that will count.'
+            : ' The AI matches those printed values against the scanned digits to work out the format.'}
         </p>
-        {scannedBox}
+        {!unscannable && scannedBox}
         <input
           ref={cameraRef}
           type="file"
@@ -284,7 +351,100 @@ export function BarcodeTeachFlow({ raw, reason, onSaved, onManual, onCancel }: B
     );
   }
 
-  // ---- 4. Human confirm (nothing saves without this) -------------------------
+  // ---- 4a. Human confirm — UNSCANNABLE carton (no format map is saved) ------
+  if (unscannable) {
+    const value = Number(weightEdit);
+    const unit = cartonRead?.unit ?? 'kg';
+    const kg = unit === 'lb' ? value * 0.45359237 : value;
+    const inRange = Number.isFinite(kg) && kg >= MIN_CARTON_KG && kg <= MAX_CARTON_KG;
+    const extras = [
+      cartonRead?.product && `Product: ${cartonRead.product}`,
+      cartonRead?.productCode && `Code: ${cartonRead.productCode}`,
+      cartonRead?.batch && `Batch: ${cartonRead.batch}`,
+      cartonRead?.serial && `Serial: ${cartonRead.serial}`,
+      cartonRead?.bestBefore && `Best before: ${cartonRead.bestBefore}`,
+      cartonRead?.useBy && `Use by: ${cartonRead.useBy}`,
+    ].filter(Boolean) as string[];
+
+    return shell(
+      'Check against the label',
+      <>
+        <p className="mt-1 text-sm text-slate-400">
+          Read from the photo by the AI. Check every value against the carton and correct anything
+          before it counts.
+        </p>
+
+        <div className="mt-3 rounded-xl bg-amber-500/10 px-3 py-2 text-xs text-amber-200 ring-1 ring-amber-500/40">
+          Recorded as AI-assisted, not a scan — flagged that way in the count and the spreadsheet.
+        </div>
+
+        <label className="mt-3 block text-sm font-medium text-slate-300">
+          Net weight ({unit}) *
+          <input
+            data-testid="barcode-teach-weight"
+            value={weightEdit}
+            onChange={(e) => setWeightEdit(e.target.value)}
+            inputMode="decimal"
+            className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-3xl font-bold tabular-nums text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
+          />
+          <span className="mt-1 block text-xs text-slate-500">
+            AI read “{cartonRead?.netWeightPrinted ?? '—'}” printed
+            {cartonRead?.confidence != null
+              ? ` · confidence ${Math.round(cartonRead.confidence * 100)}%`
+              : ''}
+            {unit === 'lb' && Number.isFinite(kg) ? ` · ${roundKg(kg).toFixed(2)} kg` : ''}
+          </span>
+          {!inRange && weightEdit !== '' && (
+            <span className="mt-1 block text-xs text-rose-300">
+              Must be {MIN_CARTON_KG}–{MAX_CARTON_KG} kg for one carton.
+            </span>
+          )}
+        </label>
+
+        <label className="mt-3 block text-sm font-medium text-slate-300">
+          Production date
+          <input
+            data-testid="barcode-teach-date"
+            type="date"
+            value={dateEdit}
+            onChange={(e) => setDateEdit(e.target.value)}
+            className="mt-1 w-full rounded-xl bg-slate-800 px-3 py-3 text-base text-slate-100 ring-1 ring-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-400"
+          />
+        </label>
+
+        {(extras.length > 0 || cartonRead?.notes) && (
+          <div className="mt-3 rounded-xl bg-slate-800/70 px-3 py-2 text-xs text-slate-400 ring-1 ring-slate-700">
+            {extras.map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+            {cartonRead?.notes && <div className="mt-1 text-amber-300/80">{cartonRead.notes}</div>}
+          </div>
+        )}
+
+        {errorBox}
+
+        <button
+          type="button"
+          data-testid="barcode-teach-save"
+          disabled={!inRange}
+          onClick={saveCartonRead}
+          className="mt-4 h-14 w-full rounded-xl bg-emerald-500 text-lg font-bold text-slate-900 active:bg-emerald-400 disabled:opacity-40"
+        >
+          ✓ Matches the label — count this carton
+        </button>
+        <button
+          type="button"
+          data-testid="barcode-teach-reject"
+          onClick={onManual}
+          className="mt-2 h-12 w-full rounded-xl bg-slate-800 text-sm font-semibold text-slate-200 ring-1 ring-slate-600"
+        >
+          ✕ Doesn’t match — enter by hand instead
+        </button>
+      </>,
+    );
+  }
+
+  // ---- 4b. Human confirm (nothing saves without this) -----------------------
   const kgValid = Number(weightEdit) > 0;
   return shell(
     'Check this against the label',

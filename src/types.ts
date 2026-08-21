@@ -14,7 +14,7 @@
 import type { WeightUnit } from './lib/units';
 
 /** How a carton's weight was captured. */
-export type EntryMethod = 'scan' | 'ocr' | 'manual';
+export type EntryMethod = 'scan' | 'ocr' | 'ai' | 'manual';
 
 /** One captured carton (barcode-scanned, OCR-read, or manually keyed). */
 export interface CartonRecord {

@@ -39,11 +39,13 @@ export interface ChickenEntry {
    * 'barcode' = actual weight read from the barcode (random-weight product);
    * 'set' = counted carton of a set-weight product (kg derived from profile);
    * 'estimate' = un-scanned carton of a random-weight PALLET — records the
-   * scanned carton's weight as an estimate (flagged in the export).
+   * scanned carton's weight as an estimate (flagged in the export);
+   * 'ai' = barcode unscannable, weight read off the label by AI and confirmed
+   * by a human (flagged in the export; never treated as a scan).
    * 'pack' / 'none' are legacy spellings of 'set' from the first release,
    * still present in stored counts — treated as 'set'.
    */
-  weightSource: 'barcode' | 'set' | 'estimate' | 'pack' | 'none';
+  weightSource: 'barcode' | 'set' | 'estimate' | 'ai' | 'pack' | 'none';
   productionDate?: string;
   bestBefore?: string;
   useBy?: string;
@@ -55,7 +57,7 @@ export interface ChickenEntry {
 /** Is this entry a set-weight carton (any spelling, incl. legacy)? Barcode
  *  and estimate entries belong to random-weight products. */
 function isSetEntry(e: ChickenEntry): boolean {
-  return e.weightSource !== 'barcode' && e.weightSource !== 'estimate';
+  return e.weightSource !== 'barcode' && e.weightSource !== 'estimate' && e.weightSource !== 'ai';
 }
 
 /** Per-GTIN chicken product profile (the teach output). */
@@ -355,6 +357,7 @@ function formatDateTime(iso: string): string {
 function sourceLabel(e: ChickenEntry): string {
   if (e.weightSource === 'barcode') return 'Actual (from barcode)';
   if (e.weightSource === 'estimate') return 'Estimated (pallet — copied from scanned carton)';
+  if (e.weightSource === 'ai') return 'AI photo of the label (human confirmed)';
   return 'Nominal (set weight)';
 }
 

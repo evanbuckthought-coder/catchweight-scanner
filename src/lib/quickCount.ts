@@ -22,7 +22,7 @@ export interface QuickCountEntry {
   /** Normalised kg (what the total sums). */
   weightKg: number;
   /** How it was captured. */
-  entry: 'scan' | 'manual';
+  entry: 'scan' | 'ai' | 'manual';
   time: string;
   /** Scan provenance (absent on manual entries and first-release counts) —
    *  what the duplicate flag matches on. */
@@ -110,7 +110,12 @@ function formatDateTime(iso: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-const ENTRY_LABEL: Record<QuickCountEntry['entry'], string> = { scan: 'Scanned', manual: 'Manual' };
+const ENTRY_LABEL: Record<QuickCountEntry['entry'], string> = {
+  scan: 'Scanned',
+  /** Barcode unreadable: AI read the printed label, human confirmed it. */
+  ai: 'AI photo (confirmed)',
+  manual: 'Manual',
+};
 
 async function buildQuickCountWorkbook(
   XLSX: typeof XLSXType,

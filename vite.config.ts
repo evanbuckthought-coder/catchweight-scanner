@@ -49,6 +49,30 @@ function mockTeachApi(): Plugin {
             }
           })();
 
+          // --- UNSCANNABLE carton read mock (mode: 'carton') ----------------
+          if (body.mode === 'carton') {
+            setTimeout(() => {
+              send(200, {
+                ok: true,
+                result: {
+                  netWeightPrinted: '17.54 KG (MOCK)',
+                  netWeightValue: 17.54,
+                  unit: 'kg',
+                  productionDate: '2026-06-30',
+                  bestBefore: null,
+                  useBy: '2026-11-17',
+                  product: 'POINT END BRISKET GRAIN FED-MSA (MOCK)',
+                  productCode: '35176',
+                  batch: '26181',
+                  serial: '425305',
+                  confidence: 0.93,
+                  notes: null,
+                },
+              });
+            }, 1200);
+            return;
+          }
+
           // --- barcode FORMAT MAP mock (mode: 'barcode') --------------------
           if (body.mode === 'barcode') {
             const digits = body.digits ?? '';

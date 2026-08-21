@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CartonRecord, GtinProfile, Session } from './types';
+import type { CartonRecord, EntryMethod, GtinProfile, Session } from './types';
 import { cartonKey, type ParsedCarton } from './lib/gs1';
 import { cartonFromDecoded, parseScan } from './lib/scan';
 import { isMapConfirmedThisSession, type DecodedBarcode, type SavedBarcodeMap } from './lib/barcodeMaps';
@@ -76,6 +76,8 @@ interface WeightPending {
   warnings: string[];
   productName: string;
   parsed: ParsedCarton;
+  /** How this carton was captured — carried through the confirm sheet. */
+  entry?: EntryMethod;
 }
 
 /** Ignore the identical decoded string while it stays in view (sliding window). */
@@ -242,7 +244,7 @@ export default function App() {
   /** Append a scanned carton to the active pallet. Feedback only fires when the
    *  carton can actually be counted — never a success beep for a no-op. */
   const commitScanned = useCallback(
-    (parsed: ParsedCarton) => {
+    (parsed: ParsedCarton, entryMethod: EntryMethod = 'scan') => {
       const cur = sessionRef.current;
       const active = cur?.products.find((p) => p.id === cur.activeProductId);
       if (!cur || !active) {
@@ -260,6 +262,7 @@ export default function App() {
           supplier: prev.supplier,
           brand: prev.brand,
           product: activeNow.product,
+          entry: entryMethod,
         });
         return withCartonAppended(prev, record);
       });
@@ -280,7 +283,7 @@ export default function App() {
    * whether it came from GS1 or from an on-device custom-format decode.
    */
   const handleDecodedCarton = useCallback(
-    (parsed: ParsedCarton) => {
+    (parsed: ParsedCarton, entryMethod: EntryMethod = 'scan') => {
       if (!session || boot !== 'ready' || view === 'summary') return;
       const raw = parsed.raw;
       // Identity: GTIN on a GS1 label, item code on a custom-format one.
@@ -315,7 +318,7 @@ export default function App() {
           product: existing?.product ?? profile?.productName ?? '',
           isNewGtin: !profile,
           weightWarnings: warnings,
-          entry: 'scan',
+          entry: entryMethod,
           resumeProductId: existing?.id,
         });
         return;
@@ -348,10 +351,10 @@ export default function App() {
         showToast(`Barcode linked to ${active.product}`, 'info');
         if (warnings.length) {
           sheetGateRef.current = true;
-          setWeightPending({ parsed, warnings, productName: active.product });
+          setWeightPending({ parsed, warnings, productName: active.product, entry: entryMethod });
           return;
         }
-        commitScanned(parsed);
+        commitScanned(parsed, entryMethod);
         return;
       }
 
@@ -365,10 +368,10 @@ export default function App() {
       // Same product. Weight guardrail before committing.
       if (warnings.length) {
         sheetGateRef.current = true;
-        setWeightPending({ parsed, warnings, productName: active.product });
+        setWeightPending({ parsed, warnings, productName: active.product, entry: entryMethod });
         return;
       }
-      commitScanned(parsed);
+      commitScanned(parsed, entryMethod);
     },
     [session, boot, view, profiles, scanWeightWarnings, commitScanned, showToast],
   );
@@ -579,7 +582,7 @@ export default function App() {
 
   const confirmWeight = useCallback(() => {
     if (!weightPending) return;
-    commitScanned(weightPending.parsed);
+    commitScanned(weightPending.parsed, weightPending.entry ?? 'scan');
     setWeightPending(null);
   }, [weightPending, commitScanned]);
 
@@ -1043,6 +1046,19 @@ export default function App() {
             {session.brand ? ` · ${session.brand}` : ''} · {scannedBy}
           </div>
         </div>
+        {/* Direct way in when a barcode plainly won't scan — no need to fail
+            repeatedly first. */}
+        <button
+          type="button"
+          data-testid="capture-analyse"
+          onClick={() => {
+            sheetGateRef.current = true;
+            setTeachRaw({ raw: '', reason: '' });
+          }}
+          className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-xs font-medium text-indigo-300 ring-1 ring-slate-600"
+        >
+          🤖 Analyse
+        </button>
         <button
           type="button"
           onClick={() => setSettingsOpen(true)}
@@ -1183,6 +1199,31 @@ export default function App() {
         <BarcodeTeachFlow
           raw={teachRaw.raw}
           reason={teachRaw.reason}
+          onCartonRead={(carton) => {
+            setTeachRaw(null);
+            // Unscannable label: the AI read it and the human confirmed it, so
+            // it enters the session as an AI-assisted carton (entry: 'ai') —
+            // never as a scan, and it teaches no barcode format.
+            handleDecodedCarton({
+              raw: '',
+              format: 'custom',
+              formatName: 'AI photo (confirmed)',
+              itemCode: carton.productCode,
+              netWeight: carton.netWeight,
+              weightUnit: carton.unit,
+              weightKg: carton.weightKg,
+              productionDate: carton.productionDate,
+              bestBefore: carton.bestBefore,
+              useBy: carton.useBy,
+              batch: carton.batch,
+              serial: carton.serial,
+              fingerprint: 'ai-photo',
+              elements: [],
+              unknownAIs: [],
+              errors: [],
+              valid: true,
+            }, 'ai');
+          }}
           onSaved={(decoded, map) => {
             setTeachRaw(null);
             // Feed the on-device decode back through the normal scan path, so

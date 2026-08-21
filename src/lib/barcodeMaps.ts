@@ -428,3 +428,26 @@ export function markMapConfirmed(id: string): void {
 export function resetSessionConfirmations(): void {
   confirmedThisSession.clear();
 }
+
+/**
+ * Values for ONE carton, confirmed by a human after an AI read of a label
+ * whose barcode could not be scanned at all.
+ *
+ * Deliberately NOT a DecodedBarcode: nothing here came from a barcode, so it
+ * carries no format map, teaches nothing, and must be recorded as AI-assisted
+ * rather than scanned wherever it lands.
+ */
+export interface ConfirmedCartonRead {
+  weightKg: number;
+  netWeight: number;
+  unit: WeightUnit;
+  productionDate?: string;
+  bestBefore?: string;
+  useBy?: string;
+  product?: string;
+  productCode?: string;
+  batch?: string;
+  serial?: string;
+  /** The weight exactly as the AI read it printed — audit trail only. */
+  printedWeight?: string;
+}
