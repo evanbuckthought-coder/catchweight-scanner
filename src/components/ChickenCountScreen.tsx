@@ -11,6 +11,7 @@ import { BarcodeTeachFlow } from './BarcodeTeachFlow';
 import { BarcodeConfirmSheet } from './BarcodeConfirmSheet';
 import { getProfile } from '../lib/profiles';
 import { createScanGate } from '../lib/scanGate';
+import { duplicateReason } from '../lib/rescan';
 import { uid } from '../lib/storage';
 import { roundKg } from '../lib/units';
 import { signalError, signalSuccess } from '../lib/feedback';
@@ -45,8 +46,13 @@ interface ChickenCountScreenProps {
   savedCount: number;
 }
 
-/** Ignore the same barcode while it stays in view. */
-const REPEAT_WINDOW_MS = 3000;
+/**
+ * Ignore the same barcode while it stays in view. Short on purpose: it stops
+ * the camera double-firing on ONE carton, while letting the next carton count
+ * even when its label is byte-identical (set-weight lines, and any supplier
+ * whose barcode carries no per-carton serial).
+ */
+const REPEAT_WINDOW_MS = 2000;
 
 /**
  * Fresh Chicken — a standalone carton tally for chicken barcodes.
@@ -157,7 +163,7 @@ export function ChickenCountScreen({
         return;
       case 'duplicate':
         signalError();
-        setFeedback({ text: `Already counted · serial ${outcome.serial}`, ok: false });
+        setFeedback({ text: duplicateReason(outcome.serial), ok: false });
         return;
       case 'needs-pack':
         sheetGateRef.current = true;

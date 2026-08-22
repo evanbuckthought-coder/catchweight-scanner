@@ -75,35 +75,7 @@ export function nextPalletNumber(product: SessionProduct): number {
   return product.pallets.reduce((max, pl) => Math.max(max, pl.number), 0) + 1;
 }
 
-/** What a scanned label needs to expose for duplicate detection. */
-export interface DuplicateProbe {
-  gtin: string;
-  serial?: string;
-  raw: string;
-}
-
-/**
- * Find an existing carton that this scan duplicates.
- *
- * - Serial (AI 21) is unique per carton -> hard dedupe on GTIN + serial.
- * - Batch (AI 10) is shared by EVERY carton in the batch — it must NOT be used
- *   for dedupe (it would block all but the first carton of a batch-traced
- *   product). For batch-only labels, only an identical full raw string (a true
- *   re-scan: same GTIN, batch AND weight) counts as a duplicate. Two genuinely
- *   identical twin cartons would also match; the operator can add the second
- *   via manual entry if that ever happens.
- * - Manual/OCR cartons have raw '' / 'OCR: ...' and no serial, so they never
- *   participate in dedupe.
- */
-export function findDuplicate(
-  cartons: CartonRecord[],
-  probe: DuplicateProbe,
-): CartonRecord | undefined {
-  if (probe.serial) {
-    return cartons.find((c) => c.gtin === probe.gtin && c.serial === probe.serial);
-  }
-  if (probe.raw) {
-    return cartons.find((c) => c.raw !== '' && c.raw === probe.raw);
-  }
-  return undefined;
-}
+// Re-scan detection lives in lib/rescan.ts (classifyRescan). It is shared by
+// New Receival, Quick Count and Fresh Chicken so all three treat a repeated
+// barcode the same way: blocked only when a SERIAL proves it is the same
+// physical carton, counted-with-a-notice otherwise.

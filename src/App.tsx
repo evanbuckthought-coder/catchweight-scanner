@@ -6,6 +6,7 @@ import { isMapConfirmedThisSession, type DecodedBarcode, type SavedBarcodeMap } 
 import { BarcodeTeachFlow } from './components/BarcodeTeachFlow';
 import { BarcodeConfirmSheet } from './components/BarcodeConfirmSheet';
 import { createScanGate } from './lib/scanGate';
+import { classifyRescan, duplicateReason, REPEAT_NOTICE } from './lib/rescan';
 import { rememberSupplier } from './lib/suppliers';
 import { rememberProduct } from './lib/products';
 import { roundKg, toKg, type WeightUnit } from './lib/units';
@@ -13,7 +14,6 @@ import { STORAGE_KEYS, uid } from './lib/storage';
 import { loadProfiles, removeProfile, upsertProfile } from './lib/profiles';
 import {
   allCartons,
-  findDuplicate,
   nextPalletNumber,
   palletSubtotal,
   poTotals,
@@ -80,8 +80,13 @@ interface WeightPending {
   entry?: EntryMethod;
 }
 
-/** Ignore the identical decoded string while it stays in view (sliding window). */
-const REPEAT_WINDOW_MS = 3000;
+/**
+ * Ignore the identical decoded string while it stays in view (sliding
+ * window). Short on purpose: it exists only to stop the camera double-firing
+ * on ONE carton, and on labels with no per-carton serial the next carton may
+ * carry a byte-identical barcode that must still count.
+ */
+const REPEAT_WINDOW_MS = 2000;
 
 /** Append a carton to the active product's active pallet, lazily creating a new
  *  pallet (with the next fixed number) when there isn't one. Pure. */
@@ -289,18 +294,18 @@ export default function App() {
       // Identity: GTIN on a GS1 label, item code on a custom-format one.
       const gtin = cartonKey(parsed)!;
 
-      // Dedupe: hard on serials; identical-raw only for batch-only labels
-      // (batches are shared across cartons and must not block the 2nd..Nth).
-      const dup = findDuplicate(allCartons(session), { gtin, serial: parsed.serial, raw });
-      if (dup) {
+      // Re-scan check: only a SERIAL can prove the same physical carton. A
+      // serial-less label that repeats is counted with a notice — blocking it
+      // silently undercounts (see lib/rescan.ts).
+      const verdict = classifyRescan(allCartons(session), { gtin, serial: parsed.serial, raw });
+      if (verdict.kind === 'duplicate') {
         signalError();
-        showToast(
-          parsed.serial
-            ? `Already scanned · serial ${parsed.serial}`
-            : 'Identical label already scanned (same batch + weight)',
-          'warn',
-        );
+        showToast(duplicateReason(verdict.serial), 'warn');
         return;
+      }
+      if (verdict.kind === 'repeat') {
+        showToast(REPEAT_NOTICE, 'warn');
+        // falls through and counts
       }
 
       const active = session.products.find((p) => p.id === session.activeProductId) ?? null;

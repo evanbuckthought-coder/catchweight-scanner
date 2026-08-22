@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   allCartons,
-  findDuplicate,
   hasMixedUnits,
   manualCount,
   ocrCount,
@@ -11,6 +10,7 @@ import {
   productSubtotal,
   totalKg,
 } from './session';
+import { classifyRescan } from './rescan';
 import type { CartonRecord, Pallet, Session, SessionProduct } from '../types';
 
 function carton(over: Partial<CartonRecord>): CartonRecord {
@@ -105,24 +105,28 @@ describe('dedupe', () => {
   const manualCarton = carton({ gtin: 'G2', batch: 'B1', raw: '', entry: 'manual' });
   const cartons = [serialCarton, batchA, batchB, manualCarton];
 
-  it('hard-dedupes on gtin + serial', () => {
-    expect(findDuplicate(cartons, { gtin: 'G1', serial: 'S1', raw: 'anything' })).toBe(serialCarton);
+  it('hard-blocks on gtin + serial', () => {
+    const v = classifyRescan(cartons, { gtin: 'G1', serial: 'S1', raw: 'anything' });
+    expect(v.kind).toBe('duplicate');
+    if (v.kind === 'duplicate') expect(v.match).toBe(serialCarton);
   });
   it('a different serial on the same gtin is not a duplicate', () => {
-    expect(findDuplicate(cartons, { gtin: 'G1', serial: 'S9', raw: 'x' })).toBeUndefined();
+    expect(classifyRescan(cartons, { gtin: 'G1', serial: 'S9', raw: 'x' }).kind).toBe('new');
   });
-  it('batch-only: a second carton of the SAME batch with a different weight is NOT a duplicate', () => {
-    // This is the critical case: batches are shared across cartons.
+  it('batch-only: a second carton of the SAME batch with a different weight is new', () => {
+    // Batches are shared across cartons, so batch alone proves nothing.
     expect(
-      findDuplicate([batchA], { gtin: 'G2', serial: undefined, raw: '(01)G2(3102)000712(10)B1' }),
-    ).toBeUndefined();
+      classifyRescan([batchA], { gtin: 'G2', serial: undefined, raw: '(01)G2(3102)000712(10)B1' }).kind,
+    ).toBe('new');
   });
-  it('batch-only: an identical full raw string (true re-scan) IS a duplicate', () => {
-    expect(
-      findDuplicate(cartons, { gtin: 'G2', serial: undefined, raw: '(01)G2(3102)000705(10)B1' }),
-    ).toBe(batchA);
+  it('batch-only: an identical raw string is a REPEAT (counted), never blocked', () => {
+    // Fribin cartons print byte-identical labels — blocking the second one
+    // silently undercounts a real carton.
+    const v = classifyRescan(cartons, { gtin: 'G2', serial: undefined, raw: '(01)G2(3102)000705(10)B1' });
+    expect(v.kind).toBe('repeat');
+    if (v.kind === 'repeat') expect(v.match).toBe(batchA);
   });
-  it('manual/OCR cartons (empty raw) never match raw-dedupe', () => {
-    expect(findDuplicate([manualCarton], { gtin: 'G2', serial: undefined, raw: '' })).toBeUndefined();
+  it('manual/OCR cartons (empty raw) never match', () => {
+    expect(classifyRescan([manualCarton], { gtin: 'G2', serial: undefined, raw: '' }).kind).toBe('new');
   });
 });

@@ -10,9 +10,9 @@ import { createScanGate } from '../lib/scanGate';
 import { roundKg, toKg, type WeightUnit } from '../lib/units';
 import { signalError, signalSuccess } from '../lib/feedback';
 import { uid } from '../lib/storage';
+import { classifyRescan, duplicateReason, REPEAT_NOTICE } from '../lib/rescan';
 import {
   exportQuickCount,
-  findQuickDuplicate,
   preloadXlsx,
   quickCountTotalKg,
   type QuickCountEntry,
@@ -37,8 +37,12 @@ interface QuickCountScreenProps {
   savedCount: number;
 }
 
-/** Ignore the same barcode while it stays in view (matches receival guard). */
-const REPEAT_WINDOW_MS = 3000;
+/**
+ * Ignore the same barcode while it stays in view (matches the receival
+ * guard). Short on purpose: it stops the camera double-firing on ONE carton,
+ * while letting the next carton count even when its label is byte-identical.
+ */
+const REPEAT_WINDOW_MS = 2000;
 
 /**
  * Quick Count: a flat weight-only tally, separate from the formal receival.
@@ -116,16 +120,17 @@ export function QuickCountScreen({
     serial: string | undefined,
     note = '',
   ) => {
-    // Same-carton flag (mirrors the receival flow): a serial match or an
-    // identical full barcode means this carton is already in the list.
-    const dup = findQuickDuplicate(entries, { gtin: key, serial, raw });
-    if (dup) {
+    // Same-carton check (mirrors the receival flow): only a SERIAL can prove
+    // the same physical carton — a serial-less repeat is counted (lib/rescan).
+    const verdict = classifyRescan(entries, { gtin: key, serial, raw });
+    if (verdict.kind === 'duplicate') {
       signalError();
-      setFeedback(
-        serial
-          ? `⚠ Already scanned — serial ${serial}. ✕ it in the list if that’s wrong.`
-          : '⚠ Already scanned — identical barcode. ✕ it in the list if that’s wrong.',
-      );
+      setFeedback(`⚠ ${duplicateReason(verdict.serial)}. ✕ it in the list if that’s wrong.`);
+      return;
+    }
+    if (verdict.kind === 'repeat') {
+      addWeight(netWeight, unit, 'scan', { gtin: key, serial, raw });
+      setFeedback(`⚠ ${REPEAT_NOTICE}`);
       return;
     }
     addWeight(netWeight, unit, 'scan', { gtin: key, serial, raw });

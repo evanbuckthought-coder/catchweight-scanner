@@ -31,34 +31,7 @@ export interface QuickCountEntry {
   raw?: string;
 }
 
-/** What a scanned barcode exposes for the duplicate check. */
-export interface QuickDuplicateProbe {
-  gtin?: string;
-  serial?: string;
-  raw: string;
-}
-
-/**
- * Find an already-counted entry this scan duplicates — same rules as the
- * receival flow's findDuplicate:
- *  - serial (AI 21) is unique per carton -> hard match on GTIN + serial;
- *  - otherwise an identical full raw string is a true re-scan of the same
- *    physical carton (two genuinely different cartons differ in weight or
- *    serial, which changes the raw).
- * Manual entries (no raw) never match, and neither do entries from before
- * this field existed.
- */
-export function findQuickDuplicate(
-  entries: QuickCountEntry[],
-  probe: QuickDuplicateProbe,
-): QuickCountEntry | undefined {
-  if (probe.gtin && probe.serial) {
-    const bySerial = entries.find((e) => e.gtin === probe.gtin && e.serial === probe.serial);
-    if (bySerial) return bySerial;
-  }
-  if (!probe.raw) return undefined;
-  return entries.find((e) => e.raw === probe.raw);
-}
+// Re-scan detection is shared with the receival flow — see lib/rescan.ts.
 
 /** A quick count saved to the device for later lookup / re-export. */
 export interface SavedQuickCount {

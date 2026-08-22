@@ -57,3 +57,39 @@ describe('createScanGate', () => {
     expect(gate.admit('hot', 2)).toBe(false);
   });
 });
+
+describe('serial-less labels: the window is a double-fire guard, not a block', () => {
+  /**
+   * Fribin cartons carry byte-identical barcodes, so the timing window is the
+   * ONLY thing standing between "camera fired twice on one carton" and "two
+   * real cartons". It has to be brief, and it must never become session-wide.
+   */
+  const FRIBIN = '(01)98420945798131(15)280223(3102)000771(10)602230529';
+
+  it('a rapid double-fire on ONE carton counts once', () => {
+    const gate = createScanGate(2000);
+    let counted = 0;
+    // The decoder fires ~4x/second while the carton is lined up.
+    for (let t = 0; t < 1800; t += 250) if (gate.admit(FRIBIN, t)) counted++;
+    expect(counted).toBe(1);
+  });
+
+  it('the NEXT identical carton counts once the barcode has left the frame', () => {
+    const gate = createScanGate(2000);
+    expect(gate.admit(FRIBIN, 0)).toBe(true); // carton 1
+    // Operator moves it away; nothing decodes for a couple of seconds.
+    expect(gate.admit(FRIBIN, 2100)).toBe(true); // carton 2 — must count
+    expect(gate.admit(FRIBIN, 4300)).toBe(true); // carton 3
+  });
+
+  it('a whole pallet of identical cartons all count at a realistic pace', () => {
+    const gate = createScanGate(2000);
+    let counted = 0;
+    // One carton every 3 s, each seen for ~1 s while being lined up.
+    for (let carton = 0; carton < 12; carton++) {
+      const start = carton * 3000;
+      for (let t = start; t < start + 1000; t += 250) if (gate.admit(FRIBIN, t)) counted++;
+    }
+    expect(counted).toBe(12);
+  });
+});
